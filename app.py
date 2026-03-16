@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 import yfinance as yf
 
 # 1. 페이지 설정 및 스타일
-st.set_page_config(page_title="사적연금 340만 관제탑", layout="wide")
+st.set_page_config(page_title="현금흐름 340만 관제탑", layout="wide")
 
 # 2. 데이터 로드 및 강력한 세척 (BOM, 공백, 쉼표 완벽 제거)
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -39,8 +39,8 @@ achievement = (current_total / TARGET_PRIVATE) * 100
 # ---------------------------------------------------------
 # 3. [심미성] 중앙 집중형 헤더
 # ---------------------------------------------------------
-st.markdown("<h2 style='text-align: center; color: #1E3A8A;'>🛡️ 사적 자산 현금흐름 통합 관제탑</h2>", unsafe_allow_html=True)
-st.markdown(f"<p style='text-align: center; color: #666; font-size: 1.1em;'>사적 자산 목표: <b>월 {TARGET_PRIVATE/10000:,.0f}만 원</b> (공적연금 제외)</p>", unsafe_allow_html=True)
+st.markdown("<h2 style='text-align: center; color: #1E3A8A;'>🛡️ 현금흐름 통합 관제탑</h2>", unsafe_allow_html=True)
+st.markdown(f"<p style='text-align: center; color: #666; font-size: 1.1em;'>자산 목표: <b>월 {TARGET_PRIVATE/10000:,.0f}만 원</b> (공적연금 제외)</p>", unsafe_allow_html=True)
 
 # ---------------------------------------------------------
 # 4. [실시간성] 시장 지표 (가족 관제탑 스타일)

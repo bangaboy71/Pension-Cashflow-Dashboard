@@ -2,5 +2,4 @@ streamlit
 pandas
 plotly
 st-gsheets-connection
-requests
-beautifulsoup4
+yfinance

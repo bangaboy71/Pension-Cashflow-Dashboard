@@ -3,12 +3,13 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import yfinance as yf  # 시장 데이터용
+import yfinance as yf
+from datetime import datetime
 
 # 1. 페이지 설정
 st.set_page_config(page_title="현금흐름 340만 관제탑", layout="wide")
 
-# 2. 데이터 로드 및 정제 레이어
+# 2. 데이터 로드 및 정제
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 try:
@@ -22,12 +23,11 @@ try:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             
 except Exception as e:
-    st.error(f"데이터 엔진 로드 실패: {e}")
+    st.error(f"데이터 로드 실패: {e}")
     st.stop()
 
-# 3. 사적 자산 필터링 및 목표 설정
-target_col = '계좌 유형'
-if target_col not in df.columns:
+# 사적 자산 필터링 (340만 목표)
+if '계좌 유형' not in df.columns:
     df.rename(columns={df.columns[0]: '계좌 유형'}, inplace=True)
 private_assets = df[df['계좌 유형'].isin(['IRP', 'ISA', '일반'])].copy()
 
@@ -36,17 +36,17 @@ current_total = private_assets['목표인출액'].sum()
 achievement = (current_total / TARGET_PRIVATE) * 100
 
 # ---------------------------------------------------------
-# 4. 중앙 제목 구성
+# 3. [디자인] 중앙 제목 및 부제목
 # ---------------------------------------------------------
 st.markdown("<h2 style='text-align: center;'>🛡️ 현금흐름 고도화 관제탑</h2>", unsafe_allow_html=True)
-st.markdown(f"<p style='text-align: center; color: gray;'>사적 자산 목표: 월 {TARGET_PRIVATE/10000:,.0f}만 원</p>", unsafe_allow_html=True)
+st.markdown(f"<p style='text-align: center; color: #666;'>자산 목표: 월 {TARGET_PRIVATE/10000:,.0f}만 원 (공적연금 제외)</p>", unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 5. 실시간 시장 지표 (가족 자산 관제탑 형식)
+# 4. [실시간 시장 지표] 제목 아래 배치
 # ---------------------------------------------------------
+@st.cache_data(ttl=3600) # 1시간마다 업데이트
 def get_market_data():
     try:
-        # 코스피, 코스닥, 환율 데이터 가져오기
         tickers = {"KOSPI": "^KS11", "KOSDAQ": "^KQ11", "USD/KRW": "USDKRW=X"}
         data = yf.download(list(tickers.values()), period="2d", interval="1d")
         
@@ -57,7 +57,6 @@ def get_market_data():
             delta = current - prev
             market_metrics[name] = (current, delta)
             
-        # 거래량 (코스피 기준)
         volume = data['Volume']["^KS11"].iloc[-1] / 10**8 # 억 단위
         return market_metrics, volume
     except:
@@ -65,7 +64,7 @@ def get_market_data():
 
 market_info, k_volume = get_market_data()
 
-# 시장 지표 표시용 4컬럼
+# 시장 지표 4컬럼 배치
 idx1, idx2, idx3, idx4 = st.columns(4)
 if market_info:
     idx1.metric("KOSPI", f"{market_info['KOSPI'][0]:,.2f}", f"{market_info['KOSPI'][1]:,.2f}")
@@ -75,14 +74,14 @@ if market_info:
 
 st.markdown("---")
 
-# 6. 상단 KPI 리포트 (연금 자산 전용)
+# 5. 자산 KPI 리포트 (중요 지표)
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("사적 월 수입", f"{current_total:,.0f}원")
-m2.metric("사적 목표 달성률", f"{achievement:.1f}%", delta=f"{achievement-100:.1f}%")
-m3.metric("사적 자산 평가액", f"{private_assets['현재 가치'].sum():,.0f}원")
+m1.metric("월 수입", f"{current_total:,.0f}원")
+m2.metric("목표 달성률", f"{achievement:.1f}%", delta=f"{achievement-100:.1f}%")
+m3.metric("자산 평가액", f"{private_assets['현재 가치'].sum():,.0f}원")
 m4.metric("세금 방어막", "우수", delta="비과세/이연 중심")
 
-# 7. 4대 핵심 시각화 탭
+# 6. 4대 핵심 시각화 탭
 tab1, tab2, tab3, tab4 = st.tabs([
     "📊 계층형 포트폴리오 (Sunburst)", 
     "🌊 현금흐름 폭포 (Waterfall)", 
@@ -134,5 +133,6 @@ with tab4:
         st.plotly_chart(fig_tax)
     with col_r:
         st.info("💡 **안전 진단 리포트**")
-        st.write(f"- **비과세/과세이연 자산 합계:** {private_assets[private_assets['세금성격'].isin(['비과세', '과세이연'])]['투자원금'].sum():,.0f}원")
+        shield_sum = private_assets[private_assets['세금성격'].isin(['비과세', '과세이연'])]['투자원금'].sum()
+        st.write(f"- **비과세/과세이연 자산 합계:** {shield_sum:,.0f}원")
         st.write("- **진단:** 금융소득종합과세 및 건보료 산정 소득으로부터 매우 안전한 상태입니다.")

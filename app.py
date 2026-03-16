@@ -15,9 +15,9 @@ st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: 1.6rem !important; font-weight: bold !important; }
     .market-box { text-align: center; padding: 12px; border-radius: 12px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.1); }
-    .market-title { color: #aaa; font-size: 0.85rem; font-weight: bold; margin-bottom: 5px; }
+    .market-title { color: #aaa; font-size: 0.8rem; font-weight: bold; margin-bottom: 5px; }
     .status-card { padding: 20px; border-radius: 12px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.1); height: 100%; }
-    .section-title { font-size: 1.1rem; font-weight: bold; color: #87CEEB; margin-bottom: 15px; border-left: 4px solid #87CEEB; padding-left: 10px; }
+    .section-title { font-size: 1.0rem; font-weight: bold; color: #87CEEB; margin-bottom: 15px; border-left: 4px solid #87CEEB; padding-left: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -26,26 +26,31 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 try:
     df = conn.read(ttl=0)
     df.columns = df.columns.str.strip().str.replace('\ufeff', '', regex=False)
-    
     numeric_cols = ['투자원금', '수량', '매입단가', '목표가', '수익률(%)']
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '').str.replace('%', ''), errors='coerce').fillna(0)
 except Exception as e:
-    st.error(f"데이터 로드 실패: {e}")
+    st.error(f"데이터 엔진 로드 실패: {e}")
     st.stop()
 
-# 고정 인출 목표 (IRP 290만, ISA 40만, 일반 10만)
+# 고정 인출 목표 및 사적 자산 필터링
 WITHDRAWAL_TARGETS = {"IRP": 2900000, "ISA": 400000, "일반": 100000}
 TOTAL_WITHDRAWAL = sum(WITHDRAWAL_TARGETS.values())
-
-# 사적 자산 필터링
 private_assets = df[df['계좌 유형'].isin(['IRP', 'ISA', '일반'])].copy()
 private_assets['종목명'] = private_assets['종목명'].str.strip()
 
 # ---------------------------------------------------------
-# 3. [복구] 시장 지표 엔진 (네이버 크롤링)
+# 3. 시장 지표 및 실시간 데이터 엔진
 # ---------------------------------------------------------
+with st.sidebar:
+    st.markdown("### ⚙️ 시뮬레이션 세팅")
+    sim_rates = {}
+    for _, row in private_assets.iterrows():
+        name = row['종목명']
+        d_rate = float(row.get('수익률(%)', 5.0))
+        sim_rates[name] = st.slider(f"{name} (%)", 0.0, 20.0, d_rate, 0.1)
+
 @st.cache_data(ttl=600)
 def get_market_status():
     data = {"KOSPI": {"val": "-", "delta": "0.00", "color": "#ffffff"}, "KOSDAQ": {"val": "-", "delta": "0.00", "color": "#ffffff"}, "USD/KRW": {"val": "-", "delta": "0원", "color": "#ffffff"}, "VOLUME": {"val": "-", "delta": "천주", "color": "#ffffff"}}
@@ -74,53 +79,40 @@ def get_market_status():
     except: pass
     return data
 
-# ---------------------------------------------------------
-# 4. 실시간 현재가 및 시뮬레이션 엔진
-# ---------------------------------------------------------
-with st.sidebar:
-    st.markdown("### ⚙️ 수익률 시뮬레이션")
-    sim_rates = {}
-    for _, row in private_assets.iterrows():
-        name = row['종목명']
-        d_rate = float(row.get('수익률(%)', 5.0))
-        sim_rates[name] = st.slider(f"{name} (%)", 0.0, 20.0, d_rate, 0.1)
-
 @st.cache_data(ttl=600)
 def fetch_prices(tickers):
     data = yf.download(tickers, period="1y", interval="1d", progress=False)
     return data['Close'] if isinstance(data.columns, pd.MultiIndex) else pd.DataFrame({tickers[0]: data['Close']})
 
+# 데이터 연동 및 시뮬레이션 계산
 tickers = private_assets['종목코드'].unique().tolist()
 price_hist = fetch_prices(tickers)
 curr_prices = price_hist.iloc[-1]
 
-# 데이터 바인딩 및 현금흐름 계산
 sim_assets = private_assets.copy()
 sim_assets['현재가'] = sim_assets['종목코드'].map(curr_prices)
 sim_assets['현재가치'] = sim_assets['현재가'] * sim_assets['수량']
 sim_assets['예상수입'] = sim_assets.apply(lambda x: (x['현재가치'] * sim_rates[x['종목명']] / 100 / 12), axis=1)
 
-# 계좌별 요약 (원금 침식 분석)
 summary = sim_assets.groupby('계좌 유형').agg({'예상수입':'sum', '현재가치':'sum'}).reset_index()
 summary['인출목표'] = summary['계좌 유형'].map(WITHDRAWAL_TARGETS)
 summary['원금침식액'] = (summary['인출목표'] - summary['예상수입']).clip(lower=0)
 
 # ---------------------------------------------------------
-# 5. 메인 레이아웃 (HUD -> KPI -> 분석 -> 탭)
+# 4. 화면 레이아웃 (제목 크기 축소 및 HUD)
 # ---------------------------------------------------------
-st.markdown("<h2 style='text-align: center; color: #87CEEB;'>🛡️ 현금흐름 방어 및 실시간 관제탑</h2>", unsafe_allow_html=True)
+st.markdown("<h3 style='text-align: center; color: #87CEEB; margin-bottom: 20px;'>🛡️ 실시간 현금흐름 방어 관제탑</h3>", unsafe_allow_html=True)
 
-# [시장 HUD]
 m_data = get_market_status()
 h1, h2, h3, h4 = st.columns(4)
 keys, titles = ["KOSPI", "KOSDAQ", "USD/KRW", "VOLUME"], ["KOSPI", "KOSDAQ", "USD/KRW", "MARKET VOL"]
 for i, col in enumerate([h1, h2, h3, h4]):
     d = m_data[keys[i]]
-    col.markdown(f"""<div class="market-box" style="border: 1px solid {d['color']}44;"><div class="market-title">{titles[i]}</div><div style="color: {d['color']}; font-size: 1.8rem; font-weight: bold;">{d['val']}</div><div style="color: {d['color']}; font-size: 1.0rem;">{d['delta']}</div></div>""", unsafe_allow_html=True)
+    col.markdown(f"""<div class="market-box" style="border: 1px solid {d['color']}44;"><div class="market-title">{titles[i]}</div><div style="color: {d['color']}; font-size: 1.6rem; font-weight: bold;">{d['val']}</div><div style="color: {d['color']}; font-size: 0.9rem;">{d['delta']}</div></div>""", unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# [상단 KPI]
+# 상단 핵심 KPI
 k1, k2, k3, k4 = st.columns(4)
 total_inc = summary['예상수입'].sum()
 total_erosion = summary['원금침식액'].sum()
@@ -131,7 +123,7 @@ k4.metric("방어 상태", "안전" if total_erosion == 0 else "주의")
 
 st.markdown("---")
 
-# [현금흐름 분석 섹션]
+# 5. 현금흐름 분석 (수입 vs 침식)
 c_left, c_right = st.columns([3, 2])
 with c_left:
     st.markdown("<div class='section-title'>📊 계좌별 현금흐름 방어 현황</div>", unsafe_allow_html=True)
@@ -143,13 +135,13 @@ with c_right:
     st.markdown("<div class='section-title'>🌊 수입 vs 원금침식 비중</div>", unsafe_allow_html=True)
     fig_pie = go.Figure(data=[go.Pie(labels=['실제수입', '원금침식'], values=[total_inc, total_erosion], 
                                      hole=.5, marker_colors=['#87CEEB', '#FF4B4B'])])
-    fig_pie.update_layout(height=250, margin=dict(l=0,r=0,t=0,b=0))
+    fig_pie.update_layout(height=230, margin=dict(l=0,r=0,t=0,b=0))
     st.plotly_chart(fig_pie, use_container_width=True)
 
 st.markdown("---")
 
-# [종목별 탭 분석 섹션]
-st.markdown("<div class='section-title'>🔍 종목별 딥다이브 관제 (추이 & 리스크)</div>", unsafe_allow_html=True)
+# 6. 종목별 딥다이브 (탭 처리)
+st.markdown("<div class='section-title'>🔍 종목별 딥다이브 관제</div>", unsafe_allow_html=True)
 tabs = st.tabs(sim_assets['종목명'].tolist())
 
 for i, tab in enumerate(tabs):
@@ -157,37 +149,48 @@ for i, tab in enumerate(tabs):
         row = sim_assets.iloc[i]
         t_code = row['종목코드']
         col_chart, col_risk = st.columns([2, 1])
-        
         with col_chart:
             period = st.radio("기간", ["3M", "6M", "1Y"], horizontal=True, key=f"btn_{t_code}")
             days = {"3M": 90, "6M": 180, "1Y": 365}[period]
             fig_l = px.line(price_hist[t_code].tail(days), title=f"{row['종목명']} ({period})")
-            fig_l.update_layout(height=350, template="plotly_white", margin=dict(t=30, b=0))
+            fig_l.update_layout(height=300, template="plotly_white", margin=dict(t=30, b=0))
             st.plotly_chart(fig_l, use_container_width=True)
-            
         with col_risk:
             curr_p, buy_p, target_p = row['현재가'], row['매입단가'], row['목표가']
             if curr_p < buy_p * 0.9: msg, clr = "🚨 원금방어 경보", "#FF4B4B"
             elif curr_p >= target_p and target_p > 0: msg, clr = "💰 익절 검토", "#87CEEB"
             else: msg, clr = "✅ 정상 보유", "#aaa"
-            
-            st.markdown(f"""
-                <div class="status-card" style="border: 1px solid {clr}66;">
-                    <div style="font-size: 0.85rem; color: #888;">{row['종목명']}</div>
-                    <div style="font-size: 1.4rem; font-weight: bold; color: {clr}; margin: 15px 0;">{msg}</div>
-                    <hr style="border: 0.1px solid #333;">
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-                        <span>현재가</span><span style="color: #FFD700; font-weight: bold;">{curr_p:,.0f}원</span>
-                    </div>
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-                        <span>매입가</span><span>{buy_p:,.0f}원</span>
-                    </div>
-                    <div style="display: flex; justify-content: space-between;">
-                        <span>수익률</span><span style="color: {'#FF4B4B' if curr_p < buy_p else '#87CEEB'};">
-                        {((curr_p/buy_p-1)*100):+.2f}%</span>
-                    </div>
-                    <div style="margin-top: 15px; font-size: 0.8rem; color: #666; border-top: 1px solid #333; padding-top: 10px;">
-                        월 예상 기여: {row['예상수입']:,.0f}원
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"""<div class="status-card" style="border: 1px solid {clr}66;"><div style="font-size: 0.8rem; color: #888;">{row['종목명']}</div><div style="font-size: 1.2rem; font-weight: bold; color: {clr}; margin: 10px 0;">{msg}</div><hr style="border: 0.1px solid #333;"><div style="display: flex; justify-content: space-between; font-size: 0.9rem; margin-bottom: 5px;"><span>현재가</span><span style="color: #FFD700;">{curr_p:,.0f}원</span></div><div style="display: flex; justify-content: space-between; font-size: 0.9rem;"><span>수익률</span><span style="color: {clr};">{((curr_p/buy_p-1)*100):+.2f}%</span></div><div style="margin-top: 10px; font-size: 0.75rem; color: #666; border-top: 1px solid #333; padding-top: 10px;">월 예상 기여: {row['예상수입']:,.0f}원</div></div>""", unsafe_allow_html=True)
+
+st.markdown("---")
+
+# 7. [복구] 하단 3단 가로 배치 차트
+st.markdown("<div class='section-title'>🌐 포트폴리오 통합 시각화</div>", unsafe_allow_html=True)
+col_a, col_b, col_c = st.columns(3)
+
+with col_a:
+    st.markdown("<p style='text-align: center; font-size: 0.9rem; color: #aaa;'>📊 자산 구조 (비중)</p>", unsafe_allow_html=True)
+    fig_sun = px.sunburst(sim_assets, path=['계좌 유형', '투자성격', '종목명'], values='현재가치',
+                          color='투자성격', color_discrete_map={'안전':'#0D47A1', '위험':'#B71C1C'}, template="plotly_white")
+    fig_sun.update_layout(height=350, margin=dict(l=0, r=0, t=0, b=0))
+    st.plotly_chart(fig_sun, use_container_width=True)
+
+with col_b:
+    st.markdown("<p style='text-align: center; font-size: 0.9rem; color: #aaa;'>🌊 수입 엔진 기여도</p>", unsafe_allow_html=True)
+    fig_water = go.Figure(go.Waterfall(
+        measure = ["relative"] * len(sim_assets) + ["total"],
+        x = list(sim_assets['종목명']) + ["총 수입"],
+        y = list(sim_assets['예상수입']) + [0],
+        text = [f"{v/10000:,.0f}만" for v in sim_assets['예상수입']] + [f"{total_inc/10000:,.0f}만"],
+        connector = {"line":{"color":"#ddd"}},
+    ))
+    fig_water.update_layout(height=350, margin=dict(l=10, r=10, t=20, b=0), template="plotly_white")
+    st.plotly_chart(fig_water, use_container_width=True)
+
+with col_c:
+    st.markdown("<p style='text-align: center; font-size: 0.9rem; color: #aaa;'>📅 월간 입금 스케줄</p>", unsafe_allow_html=True)
+    sched_df = sim_assets.sort_values('입금예정일')
+    fig_bar = px.bar(sched_df, x='입금예정일', y='예상수입', color='계좌 유형', text='종목명',
+                     color_discrete_sequence=px.colors.qualitative.Safe)
+    fig_bar.update_layout(height=350, xaxis_type='category', margin=dict(l=0, r=0, t=20, b=0), template="plotly_white")
+    st.plotly_chart(fig_bar, use_container_width=True)

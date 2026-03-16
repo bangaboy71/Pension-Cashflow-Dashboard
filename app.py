@@ -3,8 +3,7 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import requests
-from bs4 import BeautifulSoup
+import yfinance as yf
 
 # 1. 페이지 설정
 st.set_page_config(page_title="현금흐름 340만 관제탑", layout="wide")
@@ -20,7 +19,7 @@ try:
             df[col] = df[col].astype(str).str.replace(',', '').str.replace('원', '').str.strip()
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 except Exception as e:
-    st.error(f"데이터 로드 실패: {e}")
+    st.error(f"데이터 엔진 로드 실패: {e}")
     st.stop()
 
 # 사적 자산 필터링 (340만 목표)
@@ -30,71 +29,59 @@ current_total = private_assets['목표인출액'].sum()
 achievement = (current_total / TARGET_PRIVATE) * 100
 
 # ---------------------------------------------------------
-# 3. [완결] 시장 지표 엔진: 한글/특수문자 제거 및 부호 강제 부여
+# 3. [안정화] yfinance 기반 시장 지표 엔진
 # ---------------------------------------------------------
 @st.cache_data(ttl=600)
-def get_market_status():
-    data = {
-        "KOSPI": {"val": "-", "delta": "0.00"},
-        "KOSDAQ": {"val": "-", "delta": "0.00"},
-        "USD/KRW": {"val": "-", "delta": "0.00"},
-        "VOLUME": {"val": "-", "delta": "0"}
-    }
-    header = {'User-Agent': 'Mozilla/5.0'}
+def get_market_data_yf():
+    # KOSPI: ^KS11, KOSDAQ: ^KQ11, 환율: USDKRW=X
+    tickers = {"KOSPI": "^KS11", "KOSDAQ": "^KQ11", "환율": "USDKRW=X"}
     try:
-        # 코스피 & 코스닥
-        for code in ["KOSPI", "KOSDAQ"]:
-            url = f"https://finance.naver.com/sise/sise_index.naver?code={code}"
-            res = requests.get(url, headers=header, timeout=5)
-            res.encoding = 'euc-kr'
-            soup = BeautifulSoup(res.text, 'html.parser')
-            
-            val = soup.select_one("#now_value").get_text(strip=True)
-            # 변동 수치 영역 텍스트 추출 (예: "상승 10.00 +0.42%")
-            raw_delta = soup.select_one("#change_value_and_rate").get_text(" ", strip=True)
-            
-            # 숫자와 부호(+/-)만 추출하는 정밀 로직
-            # 마지막 단어(퍼센트)가 보통 가장 깨끗한 지표입니다.
-            rate = raw_delta.split()[-1] 
-            prefix = "+" if ("상승" in raw_delta or "▲" in raw_delta) else ("-" if ("하락" in raw_delta or "▼" in raw_delta) else "")
-            
-            data[code]["val"] = val
-            data[code]["delta"] = f"{prefix}{rate.replace('+', '').replace('-', '')}"
-            
-            if code == "KOSPI":
-                data["VOLUME"]["val"] = soup.select_one("#quant").get_text(strip=True)
-                data["VOLUME"]["delta"] = "천주"
-
-        # 환율
-        ex_res = requests.get("https://finance.naver.com/marketindex/", headers=header, timeout=5)
-        ex_soup = BeautifulSoup(ex_res.text, 'html.parser')
-        ex_val = ex_soup.select_one("span.value").get_text(strip=True)
-        ex_change = ex_soup.select_one("span.change").get_text(strip=True).strip()
-        ex_blind = ex_soup.select_one("div.head_info > span.blind").get_text()
+        data = yf.download(list(tickers.values()), period="2d", interval="1d", progress=False)
         
-        sign = "+" if "상승" in ex_blind else "-"
-        data["USD/KRW"]["val"] = ex_val
-        data["USD/KRW"]["delta"] = f"{sign}{ex_change}원"
-    except: pass
-    return data
+        results = {}
+        for name, symbol in tickers.items():
+            current = data['Close'][symbol].iloc[-1]
+            prev = data['Close'][symbol].iloc[-2]
+            diff = current - prev
+            pct = (diff / prev) * 100
+            
+            # 부호(+) 강제 부여하여 색상 연동
+            prefix = "+" if diff > 0 else ""
+            results[name] = {
+                "val": f"{current:,.2f}" if name != "환율" else f"{current:,.1f}",
+                "delta": f"{prefix}{diff:,.2f} ({prefix}{pct:.2f}%)" if name != "환율" else f"{prefix}{diff:,.1f}원"
+            }
+        
+        # 거래량 (코스피 기준)
+        vol_raw = data['Volume']["^KS11"].iloc[-1]
+        results["거래량"] = {"val": f"{vol_raw/1000:,.0f}", "delta": "천주"}
+        
+        return results
+    except:
+        return None
 
 # ---------------------------------------------------------
-# 4. 화면 구성 (중앙 정렬 및 지표 표출)
+# 4. 화면 구성 (중앙 제목 및 Metric 레이아웃)
 # ---------------------------------------------------------
-st.markdown("<h2 style='text-align: center; color: #1E3A8A;'>🛡️ 현금흐름 통합 관제탑</h2>", unsafe_allow_html=True)
+# 제목 중앙 정렬 (사이즈 축소)
+st.markdown("<h3 style='text-align: center; color: #1E3A8A;'>🛡️ 사적 자산 현금흐름 통합 관제탑</h3>", unsafe_allow_html=True)
 st.markdown(f"<p style='text-align: center; color: #666;'>사적 자산 목표: <b>월 {TARGET_PRIVATE/10000:,.0f}만 원</b></p>", unsafe_allow_html=True)
 
-m_data = get_market_status()
+m_data = get_market_data_yf()
 
 st.markdown("<br>", unsafe_allow_html=True)
 idx1, idx2, idx3, idx4 = st.columns(4)
 
-# st.metric은 delta의 첫 글자가 '+' 또는 '-'일 때만 자동으로 색상을 입히고 화살표를 그립니다.
-idx1.metric("KOSPI", m_data["KOSPI"]["val"], m_data["KOSPI"]["delta"])
-idx2.metric("KOSDAQ", m_data["KOSDAQ"]["val"], m_data["KOSDAQ"]["delta"])
-# 환율: delta_color="inverse" (환율 하락 시 초록/파랑으로 긍정 표시)
-idx3.metric("원/달러 환율", m_data["USD/KRW"]["val"], m_data["USD/KRW"]["delta"], delta_color="inverse")
-idx4.metric("코스피 거래량", m_data["VOLUME"]["val"], m_data["VOLUME"]["delta"], delta_color="off")
+if m_data:
+    # KOSPI/KOSDAQ: 상승 시 빨강, 하락 시 파랑 자동 연동
+    idx1.metric("KOSPI", m_data["KOSPI"]["val"], m_data["KOSPI"]["delta"])
+    idx2.metric("KOSDAQ", m_data["KOSDAQ"]["val"], m_data["KOSDAQ"]["delta"])
+    # 환율: delta_color="inverse" (하락 시 파랑/초록으로 긍정 표시)
+    idx3.metric("원/달러 환율", m_data["환율"]["val"], m_data["환율"]["delta"], delta_color="inverse")
+    # 거래량: 색상 변화 없이 표시
+    idx4.metric("코스피 거래량", m_data["거래량"]["val"], m_data["거래량"]["delta"], delta_color="off")
+else:
+    st.warning("시장 지표를 불러오는 중입니다... (잠시 후 새로고침)")
 
 st.markdown("<hr style='border: 0.5px solid #eee;'>", unsafe_allow_html=True)
 
@@ -102,10 +89,10 @@ st.markdown("<hr style='border: 0.5px solid #eee;'>", unsafe_allow_html=True)
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("월 사적 수입", f"{current_total:,.0f}원")
 k2.metric("목표 달성률", f"{achievement:.1f}%", delta=f"{achievement-100:.1f}%")
-k3.metric("사적 자산 가치", f"{private_assets['현재 가치'].sum():,.0f}원")
+k3.metric("자산 평가액", f"{private_assets['현재 가치'].sum():,.0f}원")
 k4.metric("세금 성격", "절세 중심", delta="비과세/이연", delta_color="normal")
 
-# 5. 시각화 탭
+# 5. 시각화 탭 (가족 관제탑 심미성 적용)
 st.markdown("<br>", unsafe_allow_html=True)
 t1, t2, t3, t4 = st.tabs(["📊 자산 구조", "🌊 수입 폭포", "📅 입금 일정", "🛡️ 세금 보안"])
 

@@ -47,7 +47,11 @@ with st.sidebar:
     for _, row in private_assets.iterrows():
         name = row['종목명']
         d_rate = float(row.get('수익률(%)', 5.0))
-        sim_rates[name] = st.slider(f"{name} (%)", 0.0, 20.0, d_rate, 0.1)
+        # [수정] 상한선을 25.0%로 조정
+        sim_rates[name] = st.slider(f"{name} (%)", 0.0, 25.0, d_rate, 0.1)
+    
+    if st.button("🔄 설정 초기화"):
+        st.rerun()
 
 @st.cache_data(ttl=600)
 def get_market_status():
@@ -82,7 +86,7 @@ def fetch_prices(tickers):
     data = yf.download(tickers, period="1y", interval="1d", progress=False)
     return data['Close'] if isinstance(data.columns, pd.MultiIndex) else pd.DataFrame({tickers[0]: data['Close']})
 
-# 데이터 연동 및 시뮬레이션 계산
+# 실시간 주가 데이터 연동
 tickers = private_assets['종목코드'].unique().tolist()
 price_hist = fetch_prices(tickers)
 curr_prices = price_hist.iloc[-1]
@@ -92,13 +96,13 @@ sim_assets['현재가'] = sim_assets['종목코드'].map(curr_prices)
 sim_assets['현재가치'] = sim_assets['현재가'] * sim_assets['수량']
 sim_assets['예상수입'] = sim_assets.apply(lambda x: (x['현재가치'] * sim_rates[x['종목명']] / 100 / 12), axis=1)
 
-# [개선] 원금 손익 계산 로직 (수익 - 목표)
-summary = sim_assets.groupby('계좌 유형').agg({'예상수입':'sum', '현재가치':'sum'}).reset_index()
+# [수정] 원금 손익 계산 로직 (수익 - 목표)
+summary = sim_assets.groupby('계좌 유형').agg({'예상수입':'sum', '현재가치':'sum', '투자원금':'sum'}).reset_index()
 summary['인출목표'] = summary['계좌 유형'].map(WITHDRAWAL_TARGETS)
 summary['원금 손익'] = summary['예상수입'] - summary['인출목표']
 
 # ---------------------------------------------------------
-# 4. 화면 레이아웃 (제목 크기 축소 및 HUD)
+# 4. 화면 레이아웃 (HUD)
 # ---------------------------------------------------------
 st.markdown("<h3 style='text-align: center; color: #87CEEB; margin-bottom: 20px;'>🛡️ 실시간 현금흐름 방어 관제탑</h3>", unsafe_allow_html=True)
 
@@ -111,30 +115,47 @@ for i, col in enumerate([h1, h2, h3, h4]):
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# 상단 핵심 KPI (손익으로 명칭 변경)
+# ---------------------------------------------------------
+# 5. [수정] 상단 핵심 KPI (원금, 변동액 병기)
+# ---------------------------------------------------------
 k1, k2, k3, k4 = st.columns(4)
+
 total_inc = summary['예상수입'].sum()
 total_profit_loss = summary['원금 손익'].sum()
+total_current_val = summary['현재가치'].sum()
+total_principal = sim_assets['투자원금'].sum()
+total_variance = total_current_val - total_principal
+
 k1.metric("월 예상 총 수입", f"{total_inc:,.0f}원", delta=f"{total_inc - TOTAL_WITHDRAWAL:,.0f}원")
+
+# 월 원금 손익 (초과 시 파란색/부족 시 빨간색)
 k2.metric("월 원금 손익", f"{total_profit_loss:+,.0f}원", 
-          delta=f"{total_profit_loss:,.0f}", 
           delta_color="normal" if total_profit_loss >= 0 else "inverse")
-k3.metric("실시간 자산가치", f"{summary['현재가치'].sum():,.0f}원")
+
+# [수정] 실시간 자산가치: 평가액 표시 및 델타 영역에 원금/변동액 병기
+k3.metric(
+    "실시간 자산가치", 
+    f"{total_current_val:,.0f}원", 
+    delta=f"{total_variance:+,.0f}원 (원금: {total_principal:,.0f}원)",
+    help="투자원금 대비 현재 시점의 총 평가 손익과 원금 합계입니다."
+)
+
 k4.metric("방어 상태", "안전" if total_profit_loss >= 0 else "주의")
 
 st.markdown("---")
 
-# 5. [개선] 현금흐름 분석 테이블 (색상 표기 적용)
+# ---------------------------------------------------------
+# 6. [수정] 현금흐름 분석 테이블 (색상 표기 적용)
+# ---------------------------------------------------------
 c_left, c_right = st.columns([3, 2])
 with c_left:
     st.markdown("<div class='section-title'>📊 계좌별 현금흐름 방어 현황</div>", unsafe_allow_html=True)
     
-    # Pandas 스타일링 함수
     def style_summary(val, col):
         if col == '인출목표': return 'color: #00FF00' # 녹색
         if col == '예상수입': return 'color: #87CEEB' # 파란색
         if col == '원금 손익':
-            return 'color: #87CEEB' if val >= 0 else 'color: #FF4B4B' # 파란색(+) / 붉은색(-)
+            return 'color: #87CEEB' if val >= 0 else 'color: #FF4B4B' # 플러스 파랑 / 마이너스 빨강
         return ''
 
     st.dataframe(
@@ -147,15 +168,19 @@ with c_left:
 
 with c_right:
     st.markdown("<div class='section-title'>🌊 수입 vs 인출목표 비중</div>", unsafe_allow_html=True)
-    fig_pie = go.Figure(data=[go.Pie(labels=['실제수입', '부족분' if total_profit_loss < 0 else '초과수익'], 
+    # 손익 상태에 따른 색상 분기
+    pie_clr = '#00FF00' if total_profit_loss >= 0 else '#FF4B4B'
+    pie_label = '초과수익' if total_profit_loss >= 0 else '원금침식'
+    
+    fig_pie = go.Figure(data=[go.Pie(labels=['실제수입', pie_label], 
                                      values=[total_inc, abs(total_profit_loss)], 
-                                     hole=.5, marker_colors=['#87CEEB', '#FF4B4B' if total_profit_loss < 0 else '#00FF00'])])
+                                     hole=.5, marker_colors=['#87CEEB', pie_clr])])
     fig_pie.update_layout(height=230, margin=dict(l=0,r=0,t=0,b=0))
     st.plotly_chart(fig_pie, use_container_width=True)
 
 st.markdown("---")
 
-# 6. 종목별 딥다이브 (탭 처리)
+# 7. 종목별 딥다이브 (탭 처리)
 st.markdown("<div class='section-title'>🔍 종목별 딥다이브 관제</div>", unsafe_allow_html=True)
 tabs = st.tabs(sim_assets['종목명'].tolist())
 
@@ -179,10 +204,8 @@ for i, tab in enumerate(tabs):
 
 st.markdown("---")
 
-# 7. 하단 3단 가로 배치 차트
-st.markdown("<div class='section-title'>🌐 포트폴리오 통합 시각화</div>", unsafe_allow_html=True)
+# 8. 하단 3단 시각화 (포트폴리오 통합 조망)
 col_a, col_b, col_c = st.columns(3)
-
 with col_a:
     st.markdown("<p style='text-align: center; font-size: 0.9rem; color: #aaa;'>📊 자산 구조 (비중)</p>", unsafe_allow_html=True)
     fig_sun = px.sunburst(sim_assets, path=['계좌 유형', '투자성격', '종목명'], values='현재가치',

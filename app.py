@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 import yfinance as yf
 from datetime import datetime
 
-# 1. 페이지 설정 및 UI 스타일
+# 1. 페이지 설정 및 UI 스타일 (가족 관제탑 HUD 스타일)
 st.set_page_config(page_title="현금흐름 방어 관제탑", layout="wide")
 
 st.markdown("""
@@ -21,13 +21,13 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. 데이터 로드 및 정제 (신뢰성 있는 데이터 처리)
+# 2. 데이터 로드 및 정제 (신뢰성 있는 수치 변환)
 conn = st.connection("gsheets", type=GSheetsConnection)
 try:
     df = conn.read(ttl=0)
     df.columns = df.columns.str.strip().str.replace('\ufeff', '', regex=False)
     
-    # 숫자형 데이터 세척
+    # 숫자형 데이터 세척 (주당 월분배금 포함)
     numeric_cols = ['투자원금', '수량', '매입단가', '목표가', '주당 월분배금']
     for col in numeric_cols:
         if col in df.columns:
@@ -36,7 +36,7 @@ except Exception as e:
     st.error(f"데이터 엔진 로드 실패: {e}")
     st.stop()
 
-# 인출 목표 및 사적 자산 필터링
+# 인출 목표 설정 (선생님 고정값)
 WITHDRAWAL_TARGETS = {"IRP": 2900000, "ISA": 400000, "일반": 100000}
 TOTAL_WITHDRAWAL = sum(WITHDRAWAL_TARGETS.values())
 private_assets = df[df['계좌 유형'].isin(['IRP', 'ISA', '일반'])].copy()
@@ -52,7 +52,7 @@ with st.sidebar:
     for _, row in private_assets.iterrows():
         name = row['종목명']
         default_dist = float(row.get('주당 월분배금', 0))
-        # [수정] 상한선 500원, 최소 단위 1원 조정
+        # [수정] 상한선 500원 조정, 정밀한 1원 단위 제어
         sim_dist[name] = st.slider(f"{name} (원/주)", 0.0, 500.0, default_dist, 1.0)
     
     if st.button("🔄 설정 초기화"):
@@ -94,7 +94,7 @@ def fetch_prices(tickers):
     data = yf.download(tickers, period="1y", interval="1d", progress=False)
     return data['Close'] if isinstance(data.columns, pd.MultiIndex) else pd.DataFrame({tickers[0]: data['Close']})
 
-# 데이터 연동 및 계산
+# 데이터 연동 및 실시간 가치 산출
 tickers = private_assets['종목코드'].unique().tolist()
 price_hist = fetch_prices(tickers)
 curr_prices = price_hist.iloc[-1]
@@ -103,17 +103,15 @@ sim_assets = private_assets.copy()
 sim_assets['현재가'] = sim_assets['종목코드'].map(curr_prices)
 sim_assets['현재가치'] = sim_assets['현재가'] * sim_assets['수량']
 
-# [월 단위 로직] 예상수입 = 주당 월분배금 * 수량
-sim_assets['예상수입'] = sim_assets.apply(
-    lambda x: (sim_dist[x['종목명']] * x['수량']), axis=1
-)
+# [로직 고도화] 예상수입 = 시뮬레이션된 주당 월분배금 * 수량
+sim_assets['예상수입'] = sim_assets.apply(lambda x: (sim_dist[x['종목명']] * x['수량']), axis=1)
 
 summary = sim_assets.groupby('계좌 유형').agg({'예상수입':'sum', '현재가치':'sum', '투자원금':'sum'}).reset_index()
 summary['인출목표'] = summary['계좌 유형'].map(WITHDRAWAL_TARGETS)
 summary['원금 손익'] = summary['예상수입'] - summary['인출목표']
 
 # ---------------------------------------------------------
-# 5. 메인 레이아웃 및 KPI
+# 5. 메인 대시보드 출력
 # ---------------------------------------------------------
 st.markdown("<h3 style='text-align: center; color: #87CEEB; margin-bottom: 20px;'>🛡️ 실시간 현금흐름 방어 관제탑</h3>", unsafe_allow_html=True)
 
@@ -127,7 +125,7 @@ for i, col in enumerate([h1, h2, h3, h4]):
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# 핵심 KPI
+# 핵심 KPI (자산가치 및 증감액 분리 표출)
 k1, k2, k3, k4 = st.columns(4)
 total_inc = summary['예상수입'].sum()
 total_profit_loss = summary['원금 손익'].sum()
@@ -137,18 +135,22 @@ total_variance = total_current_val - total_principal
 
 k1.metric("월 예상 총 수입", f"{total_inc:,.0f}원", delta=f"{total_inc - TOTAL_WITHDRAWAL:,.0f}원")
 k2.metric("월 원금 손익", f"{total_profit_loss:+,.0f}원", delta_color="normal" if total_profit_loss >= 0 else "inverse")
+
+# [보완] 실시간 자산가치 하단 원금 병기
 k3.metric("실시간 자산가치", f"{total_current_val:,.0f}원", delta=f"원금: {total_principal:,.0f}원", delta_color="off")
+
+# [보완] 자산 증감액 별도 표출
 k4.metric("자산 증감액", f"{total_variance:+,.0f}원", delta=f"{(total_variance/total_principal*100):+.2f}%" if total_principal > 0 else "0.00%")
 
 st.markdown("---")
 
-# 6. 현금흐름 분석 테이블
+# 6. 현금흐름 분석 테이블 및 비중 차트
 c_left, c_right = st.columns([3, 2])
 with c_left:
     st.markdown("<div class='section-title'>📊 계좌별 현금흐름 방어 현황</div>", unsafe_allow_html=True)
     def style_summary(val, col):
-        if col == '인출목표': return 'color: #00FF00'
-        if col == '예상수입': return 'color: #87CEEB'
+        if col == '인출목표': return 'color: #00FF00' # 녹색
+        if col == '예상수입': return 'color: #87CEEB' # 파란색
         if col == '원금 손익': return 'color: #87CEEB' if val >= 0 else 'color: #FF4B4B'
         return ''
 
@@ -189,7 +191,7 @@ for i, tab in enumerate(tabs):
 
 st.markdown("---")
 
-# 8. 하단 통합 시각화
+# 8. 하단 포트폴리오 통합 시각화
 col_a, col_b, col_c = st.columns(3)
 with col_a:
     fig_sun = px.sunburst(sim_assets, path=['계좌 유형', '투자성격', '종목명'], values='현재가치', color='투자성격', color_discrete_map={'안전':'#0D47A1', '위험':'#B71C1C'}, template="plotly_white")

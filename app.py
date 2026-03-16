@@ -5,7 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # 1. 페이지 설정
-st.set_page_config(page_title="사적연금 340만 관제탑", layout="wide")
+st.set_page_config(page_title="현금흐름 340만 관제탑", layout="wide")
 
 # 2. 데이터 로드 및 정제 레이어 (BOM 및 공백 제거)
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -40,14 +40,14 @@ current_total = private_assets['목표인출액'].sum()
 achievement = (current_total / TARGET_PRIVATE) * 100
 
 # 5. 메인 화면 구성 (제목 크기 축소)
-st.markdown("### 🛡️ 사적 자산 현금흐름 고도화 관제탑")
-st.markdown(f"**사적 자산 목표: 월 {TARGET_PRIVATE/10000:,.0f}만 원**")
+st.markdown("### 🛡️ 현금흐름 고도화 관제탑")
+st.markdown(f"**자산 목표: 월 {TARGET_PRIVATE/10000:,.0f}만 원**")
 
 # 상단 KPI 리포트
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("사적 월 수입", f"{current_total:,.0f}원")
-m2.metric("사적 목표 달성률", f"{achievement:.1f}%", delta=f"{achievement-100:.1f}%")
-m3.metric("사적 자산 평가액", f"{private_assets['현재 가치'].sum():,.0f}원")
+m1.metric("월 수입", f"{current_total:,.0f}원")
+m2.metric("목표 달성률", f"{achievement:.1f}%", delta=f"{achievement-100:.1f}%")
+m3.metric("자산 평가액", f"{private_assets['현재 가치'].sum():,.0f}원")
 m4.metric("세금 방어막", "우수", delta="비과세/이연 중심")
 
 st.markdown("---")

@@ -34,15 +34,13 @@ except Exception as e:
     st.error(f"데이터 엔진 로드 실패: {e}")
     st.stop()
 
-# 고정 인출 목표 및 사적 자산 필터링
+# 고정 인출 목표 (IRP 290만, ISA 40만, 일반 10만)
 WITHDRAWAL_TARGETS = {"IRP": 2900000, "ISA": 400000, "일반": 100000}
 TOTAL_WITHDRAWAL = sum(WITHDRAWAL_TARGETS.values())
 private_assets = df[df['계좌 유형'].isin(['IRP', 'ISA', '일반'])].copy()
 private_assets['종목명'] = private_assets['종목명'].str.strip()
 
-# ---------------------------------------------------------
 # 3. 시장 지표 및 실시간 데이터 엔진
-# ---------------------------------------------------------
 with st.sidebar:
     st.markdown("### ⚙️ 시뮬레이션 세팅")
     sim_rates = {}
@@ -94,9 +92,10 @@ sim_assets['현재가'] = sim_assets['종목코드'].map(curr_prices)
 sim_assets['현재가치'] = sim_assets['현재가'] * sim_assets['수량']
 sim_assets['예상수입'] = sim_assets.apply(lambda x: (x['현재가치'] * sim_rates[x['종목명']] / 100 / 12), axis=1)
 
+# [개선] 원금 손익 계산 로직 (수익 - 목표)
 summary = sim_assets.groupby('계좌 유형').agg({'예상수입':'sum', '현재가치':'sum'}).reset_index()
 summary['인출목표'] = summary['계좌 유형'].map(WITHDRAWAL_TARGETS)
-summary['원금침식액'] = (summary['인출목표'] - summary['예상수입']).clip(lower=0)
+summary['원금 손익'] = summary['예상수입'] - summary['인출목표']
 
 # ---------------------------------------------------------
 # 4. 화면 레이아웃 (제목 크기 축소 및 HUD)
@@ -112,29 +111,45 @@ for i, col in enumerate([h1, h2, h3, h4]):
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# 상단 핵심 KPI
+# 상단 핵심 KPI (손익으로 명칭 변경)
 k1, k2, k3, k4 = st.columns(4)
 total_inc = summary['예상수입'].sum()
-total_erosion = summary['원금침식액'].sum()
+total_profit_loss = summary['원금 손익'].sum()
 k1.metric("월 예상 총 수입", f"{total_inc:,.0f}원", delta=f"{total_inc - TOTAL_WITHDRAWAL:,.0f}원")
-k2.metric("월 원금 침식액", f"{total_erosion:,.0f}원", delta=f"-{total_erosion:,.0f}", delta_color="inverse")
+k2.metric("월 원금 손익", f"{total_profit_loss:+,.0f}원", 
+          delta=f"{total_profit_loss:,.0f}", 
+          delta_color="normal" if total_profit_loss >= 0 else "inverse")
 k3.metric("실시간 자산가치", f"{summary['현재가치'].sum():,.0f}원")
-k4.metric("방어 상태", "안전" if total_erosion == 0 else "주의")
+k4.metric("방어 상태", "안전" if total_profit_loss >= 0 else "주의")
 
 st.markdown("---")
 
-# 5. 현금흐름 분석 (수입 vs 침식)
+# 5. [개선] 현금흐름 분석 테이블 (색상 표기 적용)
 c_left, c_right = st.columns([3, 2])
 with c_left:
     st.markdown("<div class='section-title'>📊 계좌별 현금흐름 방어 현황</div>", unsafe_allow_html=True)
-    st.table(summary[['계좌 유형', '인출목표', '예상수입', '원금침식액']].style.format({
-        '인출목표': '{:,.0f}원', '예상수입': '{:,.0f}원', '원금침식액': '{:,.0f}원'
-    }))
+    
+    # Pandas 스타일링 함수
+    def style_summary(val, col):
+        if col == '인출목표': return 'color: #00FF00' # 녹색
+        if col == '예상수입': return 'color: #87CEEB' # 파란색
+        if col == '원금 손익':
+            return 'color: #87CEEB' if val >= 0 else 'color: #FF4B4B' # 파란색(+) / 붉은색(-)
+        return ''
+
+    st.dataframe(
+        summary[['계좌 유형', '인출목표', '예상수입', '원금 손익']].style.apply(
+            lambda x: [style_summary(v, x.name) for v in x], axis=0
+        ).format({
+            '인출목표': '{:,.0f}원', '예상수입': '{:,.0f}원', '원금 손익': '{:+,.0f}원'
+        }), use_container_width=True, hide_index=True
+    )
 
 with c_right:
-    st.markdown("<div class='section-title'>🌊 수입 vs 원금침식 비중</div>", unsafe_allow_html=True)
-    fig_pie = go.Figure(data=[go.Pie(labels=['실제수입', '원금침식'], values=[total_inc, total_erosion], 
-                                     hole=.5, marker_colors=['#87CEEB', '#FF4B4B'])])
+    st.markdown("<div class='section-title'>🌊 수입 vs 인출목표 비중</div>", unsafe_allow_html=True)
+    fig_pie = go.Figure(data=[go.Pie(labels=['실제수입', '부족분' if total_profit_loss < 0 else '초과수익'], 
+                                     values=[total_inc, abs(total_profit_loss)], 
+                                     hole=.5, marker_colors=['#87CEEB', '#FF4B4B' if total_profit_loss < 0 else '#00FF00'])])
     fig_pie.update_layout(height=230, margin=dict(l=0,r=0,t=0,b=0))
     st.plotly_chart(fig_pie, use_container_width=True)
 
@@ -164,7 +179,7 @@ for i, tab in enumerate(tabs):
 
 st.markdown("---")
 
-# 7. [복구] 하단 3단 가로 배치 차트
+# 7. 하단 3단 가로 배치 차트
 st.markdown("<div class='section-title'>🌐 포트폴리오 통합 시각화</div>", unsafe_allow_html=True)
 col_a, col_b, col_c = st.columns(3)
 

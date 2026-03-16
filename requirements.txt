@@ -3,3 +3,5 @@ pandas
 plotly
 st-gsheets-connection
 yfinance
+requests
+beautifulsoup4

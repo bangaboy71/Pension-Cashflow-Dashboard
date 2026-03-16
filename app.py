@@ -3,18 +3,18 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import yfinance as yf  # 시장 데이터용
 
 # 1. 페이지 설정
 st.set_page_config(page_title="현금흐름 340만 관제탑", layout="wide")
 
-# 2. 데이터 로드 및 정제 레이어 (BOM 및 공백 제거)
+# 2. 데이터 로드 및 정제 레이어
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 try:
     df = conn.read(ttl=0)
     df.columns = df.columns.str.strip().str.replace('\ufeff', '', regex=False)
     
-    # 숫자형 데이터 정제
     cols_to_fix = ['투자원금', '현재 가치', '목표인출액', '목표가']
     for col in cols_to_fix:
         if col in df.columns:
@@ -25,34 +25,64 @@ except Exception as e:
     st.error(f"데이터 엔진 로드 실패: {e}")
     st.stop()
 
-# 3. 사적 자산 필터링 (공적연금 제외)
+# 3. 사적 자산 필터링 및 목표 설정
 target_col = '계좌 유형'
-if target_col in df.columns:
-    private_assets = df[df[target_col].isin(['IRP', 'ISA', '일반'])].copy()
-else:
-    # 컬럼명을 못 찾을 경우 첫 번째 컬럼을 강제로 지정
+if target_col not in df.columns:
     df.rename(columns={df.columns[0]: '계좌 유형'}, inplace=True)
-    private_assets = df[df['계좌 유형'].isin(['IRP', 'ISA', '일반'])].copy()
+private_assets = df[df['계좌 유형'].isin(['IRP', 'ISA', '일반'])].copy()
 
-# 4. 목표 설정 (사적 자산 월 340만 원)
 TARGET_PRIVATE = 3400000
 current_total = private_assets['목표인출액'].sum()
 achievement = (current_total / TARGET_PRIVATE) * 100
 
-# 5. 메인 화면 구성 (제목 크기 축소)
-st.markdown("### 🛡️ 현금흐름 고도화 관제탑")
-st.markdown(f"**자산 목표: 월 {TARGET_PRIVATE/10000:,.0f}만 원**")
+# ---------------------------------------------------------
+# 4. 중앙 제목 구성
+# ---------------------------------------------------------
+st.markdown("<h2 style='text-align: center;'>🛡️ 현금흐름 고도화 관제탑</h2>", unsafe_allow_html=True)
+st.markdown(f"<p style='text-align: center; color: gray;'>사적 자산 목표: 월 {TARGET_PRIVATE/10000:,.0f}만 원</p>", unsafe_allow_html=True)
 
-# 상단 KPI 리포트
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("월 수입", f"{current_total:,.0f}원")
-m2.metric("목표 달성률", f"{achievement:.1f}%", delta=f"{achievement-100:.1f}%")
-m3.metric("자산 평가액", f"{private_assets['현재 가치'].sum():,.0f}원")
-m4.metric("세금 방어막", "우수", delta="비과세/이연 중심")
+# ---------------------------------------------------------
+# 5. 실시간 시장 지표 (가족 자산 관제탑 형식)
+# ---------------------------------------------------------
+def get_market_data():
+    try:
+        # 코스피, 코스닥, 환율 데이터 가져오기
+        tickers = {"KOSPI": "^KS11", "KOSDAQ": "^KQ11", "USD/KRW": "USDKRW=X"}
+        data = yf.download(list(tickers.values()), period="2d", interval="1d")
+        
+        market_metrics = {}
+        for name, ticker in tickers.items():
+            current = data['Close'][ticker].iloc[-1]
+            prev = data['Close'][ticker].iloc[-2]
+            delta = current - prev
+            market_metrics[name] = (current, delta)
+            
+        # 거래량 (코스피 기준)
+        volume = data['Volume']["^KS11"].iloc[-1] / 10**8 # 억 단위
+        return market_metrics, volume
+    except:
+        return None, 0
+
+market_info, k_volume = get_market_data()
+
+# 시장 지표 표시용 4컬럼
+idx1, idx2, idx3, idx4 = st.columns(4)
+if market_info:
+    idx1.metric("KOSPI", f"{market_info['KOSPI'][0]:,.2f}", f"{market_info['KOSPI'][1]:,.2f}")
+    idx2.metric("KOSDAQ", f"{market_info['KOSDAQ'][0]:,.2f}", f"{market_info['KOSDAQ'][1]:,.2f}")
+    idx3.metric("원/달러 환율", f"{market_info['USD/KRW'][0]:,.1f}", f"{market_info['USD/KRW'][1]:,.1f}", delta_color="inverse")
+    idx4.metric("코스피 거래량", f"{k_volume:.1f}억", help="단위: 억 주")
 
 st.markdown("---")
 
-# 6. 4대 핵심 시각화 탭
+# 6. 상단 KPI 리포트 (연금 자산 전용)
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("사적 월 수입", f"{current_total:,.0f}원")
+m2.metric("사적 목표 달성률", f"{achievement:.1f}%", delta=f"{achievement-100:.1f}%")
+m3.metric("사적 자산 평가액", f"{private_assets['현재 가치'].sum():,.0f}원")
+m4.metric("세금 방어막", "우수", delta="비과세/이연 중심")
+
+# 7. 4대 핵심 시각화 탭
 tab1, tab2, tab3, tab4 = st.tabs([
     "📊 계층형 포트폴리오 (Sunburst)", 
     "🌊 현금흐름 폭포 (Waterfall)", 

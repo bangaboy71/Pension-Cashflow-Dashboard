@@ -21,13 +21,13 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. 데이터 로드 및 정제
+# 2. 데이터 로드 및 정제 (신뢰성 있는 데이터 처리)
 conn = st.connection("gsheets", type=GSheetsConnection)
 try:
     df = conn.read(ttl=0)
     df.columns = df.columns.str.strip().str.replace('\ufeff', '', regex=False)
     
-    # [변경] '주당 월분배금' 컬럼 포함 숫자형 데이터 세척
+    # 숫자형 데이터 세척
     numeric_cols = ['투자원금', '수량', '매입단가', '목표가', '주당 월분배금']
     for col in numeric_cols:
         if col in df.columns:
@@ -36,24 +36,24 @@ except Exception as e:
     st.error(f"데이터 엔진 로드 실패: {e}")
     st.stop()
 
-# 고정 인출 목표 및 자산 필터링
+# 인출 목표 및 사적 자산 필터링
 WITHDRAWAL_TARGETS = {"IRP": 2900000, "ISA": 400000, "일반": 100000}
 TOTAL_WITHDRAWAL = sum(WITHDRAWAL_TARGETS.values())
 private_assets = df[df['계좌 유형'].isin(['IRP', 'ISA', '일반'])].copy()
 private_assets['종목명'] = private_assets['종목명'].str.strip()
 
 # ---------------------------------------------------------
-# 3. [변경] 사이드바 시뮬레이션 세팅 (상한 5,000원 / 1원 단위)
+# 3. 사이드바 시뮬레이션 세팅 (상한 500원 / 1원 단위)
 # ---------------------------------------------------------
 with st.sidebar:
     st.markdown("### ⚙️ 분배금 시뮬레이션")
-    st.info("주당 월분배금(원)을 조절하여 현금흐름을 예측합니다.")
+    st.info("주당 월분배금(원)을 1원 단위로 정밀 조절합니다.")
     sim_dist = {}
     for _, row in private_assets.iterrows():
         name = row['종목명']
         default_dist = float(row.get('주당 월분배금', 0))
-        # [수정] 상한선 5,000원, 최소 단위 1원 조정
-        sim_dist[name] = st.slider(f"{name} (원/주)", 0.0, 5000.0, default_dist, 1.0)
+        # [수정] 상한선 500원, 최소 단위 1원 조정
+        sim_dist[name] = st.slider(f"{name} (원/주)", 0.0, 500.0, default_dist, 1.0)
     
     if st.button("🔄 설정 초기화"):
         st.rerun()
@@ -103,12 +103,11 @@ sim_assets = private_assets.copy()
 sim_assets['현재가'] = sim_assets['종목코드'].map(curr_prices)
 sim_assets['현재가치'] = sim_assets['현재가'] * sim_assets['수량']
 
-# [변경] 계산 로직: '주당 월분배금'이므로 수량만 곱함 (12로 나누지 않음)
+# [월 단위 로직] 예상수입 = 주당 월분배금 * 수량
 sim_assets['예상수입'] = sim_assets.apply(
     lambda x: (sim_dist[x['종목명']] * x['수량']), axis=1
 )
 
-# 요약 데이터 산출
 summary = sim_assets.groupby('계좌 유형').agg({'예상수입':'sum', '현재가치':'sum', '투자원금':'sum'}).reset_index()
 summary['인출목표'] = summary['계좌 유형'].map(WITHDRAWAL_TARGETS)
 summary['원금 손익'] = summary['예상수입'] - summary['인출목표']
@@ -118,7 +117,7 @@ summary['원금 손익'] = summary['예상수입'] - summary['인출목표']
 # ---------------------------------------------------------
 st.markdown("<h3 style='text-align: center; color: #87CEEB; margin-bottom: 20px;'>🛡️ 실시간 현금흐름 방어 관제탑</h3>", unsafe_allow_html=True)
 
-# 시장 지표 HUD
+# 시장 HUD
 m_data = get_market_status()
 h1, h2, h3, h4 = st.columns(4)
 keys, titles = ["KOSPI", "KOSDAQ", "USD/KRW", "VOLUME"], ["KOSPI", "KOSDAQ", "USD/KRW", "MARKET VOL"]
@@ -143,7 +142,7 @@ k4.metric("자산 증감액", f"{total_variance:+,.0f}원", delta=f"{(total_vari
 
 st.markdown("---")
 
-# 6. 현금흐름 분석 테이블 및 비중 차트
+# 6. 현금흐름 분석 테이블
 c_left, c_right = st.columns([3, 2])
 with c_left:
     st.markdown("<div class='section-title'>📊 계좌별 현금흐름 방어 현황</div>", unsafe_allow_html=True)
@@ -190,7 +189,7 @@ for i, tab in enumerate(tabs):
 
 st.markdown("---")
 
-# 8. 하단 시각화 (포트폴리오 통합 조망)
+# 8. 하단 통합 시각화
 col_a, col_b, col_c = st.columns(3)
 with col_a:
     fig_sun = px.sunburst(sim_assets, path=['계좌 유형', '투자성격', '종목명'], values='현재가치', color='투자성격', color_discrete_map={'안전':'#0D47A1', '위험':'#B71C1C'}, template="plotly_white")

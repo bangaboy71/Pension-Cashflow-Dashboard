@@ -68,4 +68,3 @@ with c2:
     fig_bar.add_trace(go.Bar(x=['사적 목표 (340만)'], y=[TARGET_PRIVATE], name='목표', marker_color='#E53935'))
     st.plotly_chart(fig_bar, use_container_width=True)
 
-st.info("💡 본 지표는 공적연금(360만)을 제외한 사적 자산의 독립적인 생존력을 분석합니다.")

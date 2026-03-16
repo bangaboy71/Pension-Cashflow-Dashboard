@@ -1,0 +1,10 @@
+# 스트림릿 보안 파일 (가장 중요!)
+.streamlit/secrets.toml
+
+# 파이썬 컴파일 파일
+__pycache__/
+*.pyc
+
+# 운영체제 임시 파일
+.DS_Store
+Thumbs.db

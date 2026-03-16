@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import requests
 from bs4 import BeautifulSoup
+import yfinance as yf # Reboot 후에 정상 작동합니다
 
 # 1. 페이지 설정
 st.set_page_config(page_title="현금흐름 340만 관제탑", layout="wide")
@@ -30,89 +31,70 @@ current_total = private_assets['목표인출액'].sum()
 achievement = (current_total / TARGET_PRIVATE) * 100
 
 # ---------------------------------------------------------
-# 3. 시장 지표 엔진 (가족 관제탑 로직 반영 및 정밀화)
+# 3. [심미성] 중앙 제목 및 시장 지수 섹션
 # ---------------------------------------------------------
+st.markdown("<h2 style='text-align: center; color: #1E3A8A;'>🛡️ 현금흐름 통합 관제탑</h2>", unsafe_allow_html=True)
+st.markdown(f"<p style='text-align: center; color: #666;'>사적 자산 목표: <b>월 {TARGET_PRIVATE/10000:,.0f}만 원</b> (공적연금 제외)</p>", unsafe_allow_html=True)
+
+# 시장 지수 수집 함수 (가족 관제탑 로직)
 @st.cache_data(ttl=600)
-def get_market_status():
-    data = {
-        "KOSPI": {"val": "-", "delta": "0.00"},
-        "KOSDAQ": {"val": "-", "delta": "0.00"},
-        "USD/KRW": {"val": "-", "delta": "0원"},
-        "VOLUME": {"val": "-", "delta": "천주"}
-    }
-    header = {'User-Agent': 'Mozilla/5.0'}
+def get_market_data():
+    data = {"KOSPI": ["-", "0.00"], "KOSDAQ": ["-", "0.00"], "환율": ["-", "0원"], "거래량": ["-", "0"]}
     try:
-        # 코스피 & 코스닥 & 거래량
-        for code in ["KOSPI", "KOSDAQ"]:
+        header = {'User-Agent': 'Mozilla/5.0'}
+        # 코스피/코스닥
+        for code, name in [("KOSPI", "KOSPI"), ("KOSDAQ", "KOSDAQ")]:
             url = f"https://finance.naver.com/sise/sise_index.naver?code={code}"
             res = requests.get(url, headers=header, timeout=5)
             res.encoding = 'euc-kr'
             soup = BeautifulSoup(res.text, 'html.parser')
-            
             val = soup.select_one("#now_value").get_text(strip=True)
             diff = soup.select_one("#change_value_and_rate").get_text(" ", strip=True)
-            for word in ["상승", "하락", "보합"]: diff = diff.replace(word, "")
-            
-            data[code]["val"] = val
-            data[code]["delta"] = diff
-            
+            for w in ["상승", "하락", "보합"]: diff = diff.replace(w, "")
+            data[name] = [val, diff]
             if code == "KOSPI":
-                data["VOLUME"]["val"] = soup.select_one("#quant").get_text(strip=True)
-
+                data["거래량"] = [soup.select_one("#quant").get_text(strip=True), "천주"]
         # 환율
         ex_res = requests.get("https://finance.naver.com/marketindex/", headers=header, timeout=5)
         ex_soup = BeautifulSoup(ex_res.text, 'html.parser')
         ex_val = ex_soup.select_one("span.value").get_text(strip=True)
         ex_change = ex_soup.select_one("span.change").get_text(strip=True)
         ex_blind = ex_soup.select_one("div.head_info > span.blind").get_text()
-        sign = "-" if "하락" in ex_blind else ("+" if "상승" in ex_blind else "")
-        
-        data["USD/KRW"]["val"] = ex_val
-        data["USD/KRW"]["delta"] = f"{sign}{ex_change}원"
+        sign = "-" if "하락" in ex_blind else "+"
+        data["환율"] = [ex_val, f"{sign}{ex_change}원"]
     except: pass
     return data
 
-# ---------------------------------------------------------
-# 4. 화면 구성 (디자인 및 Metric 연동)
-# ---------------------------------------------------------
-# 제목 중앙 정렬
-st.markdown("<h2 style='text-align: center; color: #1E3A8A;'>🛡️ 현금흐름 통합 관제탑</h2>", unsafe_allow_html=True)
-st.markdown(f"<p style='text-align: center; color: #666;'>사적 자산 목표: <b>월 {TARGET_PRIVATE/10000:,.0f}만 원</b> (공적연금 제외)</p>", unsafe_allow_html=True)
+m_data = get_market_data()
 
-# 시장 지표 데이터 가져오기
-m_data = get_market_status()
-
-# 시장 지표 섹션 (4열 배치)
+# 시장 지표 4열 배치 (가족 관제탑과 동일 레이아웃)
 st.markdown("<br>", unsafe_allow_html=True)
-idx1, idx2, idx3, idx4 = st.columns(4)
-idx1.metric("KOSPI", m_data["KOSPI"]["val"], m_data["KOSPI"]["delta"])
-idx2.metric("KOSDAQ", m_data["KOSDAQ"]["val"], m_data["KOSDAQ"]["delta"])
-# 환율: delta_color="inverse" 적용 (내려갈 때 파란색이 아닌 긍정적 의미 부여 가능)
-idx3.metric("원/달러 환율", m_data["USD/KRW"]["val"], m_data["USD/KRW"]["delta"], delta_color="inverse")
-idx4.metric("코스피 거래량", m_data["VOLUME"]["val"], m_data["VOLUME"]["delta"])
+i1, i2, i3, i4 = st.columns(4)
+i1.metric("KOSPI", m_data["KOSPI"][0], m_data["KOSPI"][1])
+i2.metric("KOSDAQ", m_data["KOSDAQ"][0], m_data["KOSDAQ"][1])
+i3.metric("원/달러 환율", m_data["환율"][0], m_data["환율"][1], delta_color="inverse")
+i4.metric("코스피 거래량", m_data["거래량"][0], m_data["거래량"][1])
 
 st.markdown("<hr style='border: 0.5px solid #eee;'>", unsafe_allow_html=True)
 
-# 자산 핵심 KPI
+# 4. 연금 KPI (가독성 강화)
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("월 사적 수입", f"{current_total:,.0f}원")
+k1.metric("월 예상 수입", f"{current_total:,.0f}원")
 k2.metric("목표 달성률", f"{achievement:.1f}%", delta=f"{achievement-100:.1f}%")
 k3.metric("사적 자산 평가액", f"{private_assets['현재 가치'].sum():,.0f}원")
 k4.metric("세금 성격", "절세 중심", delta="비과세/이연")
 
-# 5. 고도화 시각화 탭
+# 5. 시각화 탭
 st.markdown("<br>", unsafe_allow_html=True)
 t1, t2, t3, t4 = st.tabs(["📊 자산 구조", "🌊 수입 폭포", "📅 입금 일정", "🛡️ 세금 보안"])
 
 with t1:
-    st.subheader("계층형 포트폴리오 분석")
     fig_sun = px.sunburst(private_assets, path=['계좌 유형', '투자성격', '종목명'], values='투자원금',
                           color='투자성격', color_discrete_map={'안전':'#0D47A1', '위험':'#B71C1C'},
                           template="plotly_white")
     st.plotly_chart(fig_sun, use_container_width=True)
 
 with t2:
-    st.subheader("사적 자산 수입 엔진 (목표 340만)")
     fig_water = go.Figure(go.Waterfall(
         measure = ["relative"] * len(private_assets) + ["total"],
         x = list(private_assets['종목명']) + ["총 수입"],
@@ -120,8 +102,10 @@ with t2:
         text = [f"{v/10000:,.1f}만" for v in private_assets['목표인출액']] + [f"{current_total/10000:,.1f}만"],
         connector = {"line":{"color":"#ddd"}},
     ))
-    fig_water.add_hline(y=TARGET_PRIVATE, line_dash="dash", line_color="red", annotation_text="목표 340만")
+    fig_water.update_layout(title="340만 원 목표 달성 폭포", template="plotly_white")
     st.plotly_chart(fig_water, use_container_width=True)
+
+# ... (t3, t4는 이전과 동일)
 
 with t3:
     st.subheader("월간 현금 유입 스케줄")

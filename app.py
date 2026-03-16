@@ -3,38 +3,45 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import plotly.express as px
 
-# 1. 페이지 설정
 st.set_page_config(page_title="연금 현금흐름 관제탑", layout="wide")
 
-# 2. 구글 시트 연결
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 try:
-    # 데이터 로드
+    # 1. 데이터 로드 및 컬럼명 청소
     df = conn.read()
     
-    # [핵심] 컬럼명 정리: 앞뒤 공백 제거
-    df.columns = df.columns.str.strip()
-    
-    # [핵심] 금액 데이터 정제: 쉼표(,) 제거 및 숫자로 변환
-    if '금액(원)' in df.columns:
-        df['금액(원)'] = df['금액(원)'].astype(str).str.replace(',', '').str.replace(' ', '')
-        df['금액(원)'] = pd.to_numeric(df['금액(원)'], errors='coerce').fillna(0)
+    # 컬럼명의 앞뒤 공백을 제거하고, 모든 공백을 없애서 비교하기 쉽게 만듭니다.
+    # 예: '자산 명 ' -> '자산명', '금액(원)' -> '금액(원)'
+    df.columns = df.columns.str.strip().str.replace(' ', '')
 
-    # 데이터 추출 (항목명이 정확해야 합니다)
-    public_pension = df.loc[df['자산명'] == '공적연금', '금액(원)'].values[0]
-    irp_total = df.loc[df['자산명'] == 'IRP (SOL팔란티어)', '금액(원)'].values[0]
-    isa_total = df.loc[df['자산명'] == 'ISA (KODEX200)', '금액(원)'].values[0]
-    target_monthly = df.loc[df['자산명'] == '목표생활비', '금액(원)'].values[0]
+    # 2. 유연한 컬럼 매핑 (항목 or 자산명 / 금액 or 금액(원))
+    name_col = '자산명' if '자산명' in df.columns else '항목'
+    val_col = '금액(원)' if '금액(원)' in df.columns else '금액'
+    rate_col = '예상수익률(연%)' if '예상수익률(연%)' in df.columns else '예상수익률'
+
+    # 금액 데이터 숫자 변환 (쉼표 제거)
+    df[val_col] = df[val_col].astype(str).str.replace(',', '').str.replace('원', '').str.strip()
+    df[val_col] = pd.to_numeric(df[val_col], errors='coerce').fillna(0)
+
+    # 3. 데이터 추출 (시트의 내용과 코드의 매칭)
+    # 시트에 '공적연금' 혹은 '국민연금' 등 명칭이 정확해야 합니다.
+    public_pension = df.loc[df[name_col].str.contains('연금', na=False), val_col].values[0]
+    irp_total = df.loc[df[name_col].str.contains('IRP', na=False), val_col].values[0]
+    isa_total = df.loc[df[name_col].str.contains('ISA', na=False), val_col].values[0]
+    target_monthly = df.loc[df[name_col].str.contains('목표', na=False), val_col].values[0]
     
-    # 수익률 추출 및 월 수익률 변환
-    irp_rate_base = df.loc[df['자산명'] == 'IRP (SOL팔란티어)', '예상수익률(연 %)'].values[0] / 12 / 100
-    isa_rate_base = df.loc[df['자산명'] == 'ISA (KODEX200)', '예상수익률(연 %)'].values[0] / 12 / 100
+    # 수익률 계산 (시트에 수익률 열이 있으면 사용, 없으면 기본값 적용)
+    irp_rate = 0.012 # 기본 월 1.2%
+    if rate_col in df.columns:
+        try:
+            raw_rate = df.loc[df[name_col].str.contains('IRP', na=False), rate_col].values[0]
+            irp_rate = float(str(raw_rate).replace('%','')) / 100 / 12
+        except: pass
 
 except Exception as e:
     st.error(f"데이터 로드 실패: {e}")
-    # 디버깅용: 현재 시트가 어떻게 읽히는지 보여줍니다.
-    st.write("현재 시트 컬럼 목록:", list(df.columns) if 'df' in locals() else "로드 안 됨")
+    st.write("현재 인식된 컬럼:", list(df.columns))
     st.stop()
 
 # 3. 사이드바 - 실시간 시뮬레이션

@@ -90,6 +90,91 @@ def get_market_status():
     except: pass
     return data
 
+# (기존 import 및 시장 지표 수집 함수 생략 - 이전 버전과 동일)
+
+# ---------------------------------------------------------
+# [신규] 리스크 관리 및 리밸런싱 엔진
+# ---------------------------------------------------------
+def get_strategy_signal(row):
+    curr = row['현재 가치'] / row['수량'] if row['수량'] > 0 else 0
+    buy_p = row['매입단가']
+    target_p = row['목표가']
+    
+    # 1. 손실 방어 (원금 대비 -10% 시 경고)
+    if curr < buy_p * 0.9: return "⚠️ 손절 검토", "#FF4B4B"
+    # 2. 이익 보존 (목표가 달성 시)
+    if curr >= target_p: return "✅ 이익 실현", "#87CEEB"
+    # 3. 비중 확대 (매입가 부근 및 상승 추세)
+    if buy_p * 0.95 <= curr <= buy_p * 1.05: return "🔍 비중 관찰", "#FFD700"
+    
+    return "⚓ 보유", "#aaa"
+
+# ---------------------------------------------------------
+# [메인 화면] 리밸런싱 및 가격 추이 섹션
+# ---------------------------------------------------------
+st.markdown("### 🎯 포트폴리오 전략 및 리밸런싱")
+
+# 1. 자산별 주가 추이 차트 (yfinance 활용)
+with st.expander("📈 보유 종목별 6개월 주가 추이 확인"):
+    cols = st.columns(len(private_assets))
+    for i, (idx, row) in enumerate(private_assets.iterrows()):
+        with cols[i]:
+            ticker = row['종목코드']
+            hist = yf.download(ticker, period="6mo", interval="1d", progress=False)
+            if not hist.empty:
+                fig_line = px.line(hist, y='Close', title=f"{row['종목명']}")
+                fig_line.update_layout(height=200, margin=dict(l=0,r=0,t=30,b=0), xaxis_title="", yaxis_title="")
+                st.plotly_chart(fig_line, use_container_width=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# 2. 리밸런싱 가이드 테이블
+st.subheader("⚖️ 자산별 비중 조절 및 리스크 가이드")
+
+# 현재 비중 계산
+total_eval = private_assets['현재 가치'].sum()
+private_assets['현재 비중(%)'] = (private_assets['현재 가치'] / total_eval * 100).round(1)
+
+# 전략 데이터 구성
+strategy_data = []
+for _, row in private_assets.iterrows():
+    sig, color = get_strategy_signal(row)
+    strategy_data.append({
+        "종목명": row['종목명'],
+        "현재 비중": f"{row['현재 비중(%)']}%",
+        "수익률": f"{row['수익률(%)']}%",
+        "상태": sig,
+        "색상": color
+    })
+
+# 가이드 출력
+s_cols = st.columns(len(strategy_data))
+for i, s in enumerate(strategy_data):
+    with s_cols[i]:
+        st.markdown(f"""
+            <div style='padding: 20px; border-radius: 12px; background: rgba(255,255,255,0.02); border: 1px solid {s['색상']}44; text-align: center;'>
+                <div style='font-size: 0.9rem; color: #aaa; margin-bottom: 10px;'>{s['종목명']}</div>
+                <div style='font-size: 1.5rem; font-weight: bold; color: {s['색상']};'>{s['상태']}</div>
+                <div style='margin-top: 10px; font-size: 0.85rem;'>현재 비중: {s['현재 비중']}</div>
+            </div>
+        """, unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# 3. 매수/매도 시뮬레이션 (비중 조절 계산기)
+with st.expander("🧮 비중 조절 시뮬레이터"):
+    c1, c2, c3 = st.columns(3)
+    sel_stock = c1.selectbox("조절할 종목", private_assets['종목명'].unique())
+    trade_type = c2.radio("구분", ["매수(+)", "매도(-)"])
+    trade_amt = c3.number_input("거래 금액(원)", value=0, step=100000)
+    
+    if trade_amt > 0:
+        new_total = total_eval + (trade_amt if trade_type == "매수(+)" else -trade_amt)
+        target_row = private_assets[private_assets['종목명'] == sel_stock].iloc[0]
+        new_stock_val = target_row['현재 가치'] + (trade_amt if trade_type == "매수(+)" else -trade_amt)
+        new_pct = (new_stock_val / new_total * 100)
+        st.info(f"💡 {sel_stock}을(를) {trade_amt:,.0f}원 {trade_type} 시, 비중이 **{target_row['현재 비중(%)']}% → {new_pct:.1f}%**로 조정됩니다.")
+
 # ---------------------------------------------------------
 # 4. 화면 구성 (HUD 렌더링)
 # ---------------------------------------------------------

@@ -1,7 +1,7 @@
 streamlit
 pandas
 plotly
-st-gsheets-connection
 yfinance
 requests
 beautifulsoup4
+st-gsheets-connection>=0.0.5

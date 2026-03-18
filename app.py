@@ -1067,3 +1067,304 @@ with st.expander("📋 연도별 상세 데이터 보기"):
             ),
         },
     )
+
+
+# ════════════════════════════════════════════════════════
+# 연간 현금흐름 캘린더 히트맵
+# ════════════════════════════════════════════════════════
+st.divider()
+st.markdown("## 📅 연간 현금흐름 캘린더 히트맵")
+st.caption("월별 세후 수령액을 색상 강도로 표현합니다. ETF 분배금은 잔액 감소에 따라 월마다 달라집니다.")
+
+# ── 히트맵용 월별 수령액 계산 ────────────────────────────
+import calendar as cal_mod
+
+def build_monthly_cashflow(
+    start_year: int,
+    n_years: int,
+    public_pension: float,
+    irp_total: float,
+    isa_total: float,
+    general_total: float,
+    irp_rate: float,
+    isa_rate: float,
+    general_rate: float,
+    use_after_tax: bool,
+    use_health_ins: bool,
+) -> pd.DataFrame:
+    """
+    연도×월 단위로 세후 수령액을 계산해 DataFrame 반환.
+    IRP·ISA·일반 잔액은 매월 인출 후 감소.
+    """
+    rows = []
+    irp_bal  = irp_total
+    isa_bal  = isa_total
+    gen_bal  = general_total
+
+    for yr in range(start_year, start_year + n_years):
+        for mo in range(1, 13):
+            # 수입원별 월 수령액
+            pub_m = public_pension
+            irp_m = irp_bal * irp_rate  if irp_bal > 0 else 0.0
+            isa_m = isa_bal * isa_rate  if isa_bal > 0 else 0.0
+            gen_m = gen_bal * general_rate if gen_bal > 0 else 0.0
+
+            # 잔액 차감 (월말 기준)
+            irp_bal = max(0.0, irp_bal - irp_m)
+            isa_bal = max(0.0, isa_bal - isa_m)
+            gen_bal = max(0.0, gen_bal - gen_m)
+
+            gross = pub_m + irp_m + isa_m + gen_m
+
+            # 세후 적용
+            if use_after_tax and gross > 0:
+                tr = calc_after_tax(pub_m, irp_m, isa_m)
+                # 일반 계좌 배당소득세 15.4%
+                gen_tax = gen_m * 0.154
+                net = tr["총_세후"] + (gen_m - gen_tax)
+                if not use_health_ins:
+                    net += tr["공적연금_건보료"]
+            else:
+                net = gross
+
+            rows.append({
+                "연도": yr,
+                "월":   mo,
+                "공무원연금": pub_m,
+                "IRP":       irp_m,
+                "ISA":       isa_m,
+                "일반":      gen_m,
+                "세전합계":  gross,
+                "세후합계":  net,
+                "IRP잔액":   irp_bal,
+                "ISA잔액":   isa_bal,
+            })
+
+    return pd.DataFrame(rows)
+
+# ── 히트맵 설정 ──────────────────────────────────────────
+current_year = 2026
+hm_years = st.slider(
+    "히트맵 표시 연수",
+    min_value=3, max_value=30, value=10, step=1,
+    key="hm_years",
+)
+
+# 일반 계좌 분배율 (사이드바 또는 기본값)
+general_total = safe_get(df, "일반", default=0.0)
+default_general = safe_get(df, "일반기본분배율", default=0.1)
+
+with st.sidebar:
+    st.divider()
+    st.subheader("📅 히트맵 설정")
+    general_rate_hm = st.slider(
+        "일반(머니마켓) 월 분배율 (%)",
+        min_value=0.0, max_value=1.0,
+        value=float(default_general), step=0.01,
+        key="general_rate_hm",
+    ) / 100
+
+hm_df = build_monthly_cashflow(
+    start_year    = current_year,
+    n_years       = hm_years,
+    public_pension = public_pension,
+    irp_total     = irp_total,
+    isa_total     = isa_total,
+    general_total = general_total,
+    irp_rate      = palantir_rate,
+    isa_rate      = kodex_rate,
+    general_rate  = general_rate_hm,
+    use_after_tax = show_tax,
+    use_health_ins = use_health_ins,
+)
+
+income_col = "세후합계" if show_tax else "세전합계"
+
+# ── 히트맵 차트 ─────────────────────────────────────────
+years_list = sorted(hm_df["연도"].unique())
+months_kr  = ["1월","2월","3월","4월","5월","6월",
+               "7월","8월","9월","10월","11월","12월"]
+
+# z값: 연도(행) × 월(열) 매트릭스
+z_matrix    = []
+text_matrix = []
+for yr in years_list:
+    row_data = hm_df[hm_df["연도"] == yr].sort_values("월")
+    z_row, t_row = [], []
+    for _, r in row_data.iterrows():
+        val = r[income_col]
+        z_row.append(val / 10000)
+        t_row.append(f"{yr}년 {int(r['월'])}월<br>"
+                     f"{'세후' if show_tax else '세전'}: {val/10000:.1f}만원<br>"
+                     f"공무원연금: {r['공무원연금']/10000:.1f}만원<br>"
+                     f"IRP: {r['IRP']/10000:.1f}만원<br>"
+                     f"ISA: {r['ISA']/10000:.1f}만원"
+                     + (f"<br>일반: {r['일반']/10000:.1f}만원" if r['일반'] > 0 else ""))
+    z_matrix.append(z_row)
+    text_matrix.append(t_row)
+
+fig_hm = go.Figure(go.Heatmap(
+    z            = z_matrix,
+    x            = months_kr,
+    y            = [str(y) for y in years_list],
+    text         = text_matrix,
+    hovertemplate = "%{text}<extra></extra>",
+    colorscale   = [
+        [0.0,  "#1a1a2e"],
+        [0.2,  "#16213e"],
+        [0.4,  "#0f4c81"],
+        [0.6,  "#1a7abf"],
+        [0.8,  "#87CEEB"],
+        [1.0,  "#7dffb0"],
+    ],
+    showscale    = True,
+    colorbar     = dict(
+        title    = dict(text="만원", side="right"),
+        tickfont = dict(color="rgba(255,255,255,0.6)", size=10),
+        thickness = 12,
+        len       = 0.8,
+    ),
+    xgap = 2,
+    ygap = 2,
+))
+
+# 목표 생활비 기준선 — 색상 경계값 강조 annotaion
+target_in_man = target_monthly / 10000
+fig_hm.add_annotation(
+    x=months_kr[-1], y=str(years_list[-1]),
+    text=f"목표 {target_in_man:.0f}만원",
+    showarrow=False,
+    font=dict(color="#FFD700", size=10),
+    xanchor="right", yanchor="bottom",
+)
+
+fig_hm.update_layout(
+    height        = max(300, hm_years * 32 + 80),
+    paper_bgcolor = "rgba(0,0,0,0)",
+    plot_bgcolor  = "rgba(0,0,0,0)",
+    font_color    = "white",
+    margin        = dict(t=20, b=40, l=60, r=80),
+    xaxis         = dict(
+        tickfont = dict(size=11, color="rgba(255,255,255,0.7)"),
+        side     = "top",
+    ),
+    yaxis         = dict(
+        tickfont  = dict(size=11, color="rgba(255,255,255,0.7)"),
+        autorange = "reversed",
+    ),
+)
+st.plotly_chart(fig_hm, use_container_width=True)
+
+# ── 월별 수령액 추이 라인차트 (수입원 분해) ──────────────
+st.markdown("#### 📈 월별 수입원 분해 추이")
+
+fig_line = go.Figure()
+
+source_map = [
+    ("공무원연금", "#87CEEB", "solid"),
+    ("IRP",       "#FFD700", "solid"),
+    ("ISA",       "#FF4B4B", "solid"),
+]
+if general_total > 0:
+    source_map.append(("일반", "#7dffb0", "dot"))
+
+# x축: 연월 문자열
+hm_df["연월"] = hm_df["연도"].astype(str) + "-" + hm_df["월"].apply(lambda m: f"{m:02d}")
+
+for src, color, dash in source_map:
+    fig_line.add_trace(go.Scatter(
+        x    = hm_df["연월"],
+        y    = hm_df[src] / 10000,
+        name = src,
+        mode = "lines",
+        line = dict(color=color, width=2, dash=dash),
+        hovertemplate = f"{src}: %{{y:.1f}}만원<extra></extra>",
+    ))
+
+# 세후 합계
+fig_line.add_trace(go.Scatter(
+    x    = hm_df["연월"],
+    y    = hm_df[income_col] / 10000,
+    name = f"{'세후' if show_tax else '세전'} 합계",
+    mode = "lines",
+    line = dict(color="white", width=2.5, dash="solid"),
+    hovertemplate = "합계: %{y:.1f}만원<extra></extra>",
+))
+
+# 목표 생활비 기준선
+fig_line.add_hline(
+    y             = target_in_man,
+    line_dash     = "dot",
+    line_color    = "#FFD700",
+    line_width    = 1.5,
+    annotation_text = f"목표 {target_in_man:.0f}만원",
+    annotation_position = "top right",
+    annotation_font_color = "#FFD700",
+)
+
+# x축 눈금: 매년 1월만 표시
+tick_vals = hm_df[hm_df["월"] == 1]["연월"].tolist()
+fig_line.update_layout(
+    height        = 320,
+    paper_bgcolor = "rgba(0,0,0,0)",
+    plot_bgcolor  = "rgba(255,255,255,0.02)",
+    font_color    = "white",
+    legend        = dict(orientation="h", yanchor="bottom",
+                         y=-0.3, xanchor="center", x=0.5),
+    margin        = dict(t=10, b=80, l=10, r=10),
+    yaxis         = dict(title="월 수령액 (만원)", tickformat=","),
+    xaxis         = dict(
+        tickvals  = tick_vals,
+        ticktext  = [v[:4] + "년" for v in tick_vals],
+        tickangle = -30,
+    ),
+    hovermode     = "x unified",
+)
+st.plotly_chart(fig_line, use_container_width=True)
+
+# ── 연간 총 수령액 요약 테이블 ──────────────────────────
+st.markdown("#### 📋 연간 수령액 요약")
+
+annual = (
+    hm_df.groupby("연도")[[
+        "공무원연금", "IRP", "ISA", "일반", "세전합계", "세후합계"
+    ]].sum() / 10000
+).round(1).reset_index()
+
+annual["나이"] = annual["연도"] - birth_year
+annual["달성률(%)"] = (
+    (annual[income_col] * 10000 / 12) / target_monthly * 100
+    if target_monthly > 0 else 0
+).round(1)
+
+display_annual = annual.rename(columns={
+    "공무원연금": "공무원연금(만원)",
+    "IRP":       "IRP(만원)",
+    "ISA":       "ISA(만원)",
+    "일반":      "일반(만원)",
+    "세전합계":  "세전합계(만원)",
+    "세후합계":  "세후합계(만원)",
+    "달성률(%)": "월평균 달성률(%)",
+})
+
+st.dataframe(
+    display_annual,
+    hide_index=True,
+    use_container_width=True,
+    column_config={
+        "연도":             st.column_config.NumberColumn("연도",   format="%d년"),
+        "나이":             st.column_config.NumberColumn("나이",   format="%d세"),
+        "공무원연금(만원)": st.column_config.NumberColumn("공무원연금", format="%,.1f"),
+        "IRP(만원)":        st.column_config.NumberColumn("IRP",    format="%,.1f"),
+        "ISA(만원)":        st.column_config.NumberColumn("ISA",    format="%,.1f"),
+        "일반(만원)":       st.column_config.NumberColumn("일반",   format="%,.1f"),
+        "세전합계(만원)":   st.column_config.NumberColumn("세전합계", format="%,.1f"),
+        "세후합계(만원)":   st.column_config.NumberColumn("세후합계", format="%,.1f"),
+        "월평균 달성률(%)": st.column_config.ProgressColumn(
+            "월평균 달성률",
+            format="%.1f%%",
+            min_value=0,
+            max_value=300,
+        ),
+    },
+)

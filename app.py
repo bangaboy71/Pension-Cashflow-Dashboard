@@ -727,7 +727,10 @@ else:
                 while bal > 0 and year < 2100:
                     bal = max(0.0, bal - bal * rate_s * 12)
                     year += 1
-                exhaust_age = year - int(birth_year)  # ✅ birth_year int 변환
+                # birth_year는 타임라인 사이드바(이 섹션보다 뒤)에서 정의됨
+                # → session_state 또는 기본값으로 안전하게 읽기
+                _birth_yr = int(st.session_state.get("birth_year_input", 1971))
+                exhaust_age = year - _birth_yr
                 col.metric(
                     f"{asset_name} 고갈 시점",
                     f"{year}년 ({exhaust_age}세)" if year < 2100 else "고갈 없음",
@@ -892,7 +895,7 @@ st.caption("은퇴부터 기대수명까지 수입원이 어떻게 바뀌는지 
 with st.sidebar:
     st.divider()
     st.subheader("📅 타임라인 설정")
-    birth_year     = st.number_input("출생 연도", value=1971, min_value=1950, max_value=1985, step=1)
+    birth_year     = st.number_input("출생 연도", value=1971, min_value=1950, max_value=1985, step=1, key="birth_year_input")
     retire_age     = st.number_input("은퇴 나이",  value=55,  min_value=50,   max_value=75,   step=1)
     pension_age    = st.number_input("공무원연금 개시 나이", value=55, min_value=50, max_value=70, step=1)
     life_exp       = st.number_input("기대 수명",  value=90,  min_value=70,   max_value=100,  step=1)

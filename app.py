@@ -245,22 +245,131 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── 상단 메트릭 4개 ──
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("목표 달성률",
-          f"{achievement:.1f}%",
-          delta=f"{achievement-100:+.1f}%p")
-m2.metric(f"총 {'세후' if show_tax else '세전'} 월 수입",
-          f"{display_income:,.0f}원")
-m3.metric("총 공제액",
-          f"{tax_result['총_공제액']:,.0f}원",
-          delta=f"-{tax_result['실효세율']:.1f}%",
-          delta_color="inverse")
-m4.metric("목표 생활비",
-          f"{target_monthly:,.0f}원",
-          delta=f"{display_income - target_monthly:+,.0f}원")
+# ── 게이지 + 메트릭 레이아웃 ──────────────────────────
+gauge_col, metric_col = st.columns([1, 1])
 
-st.info("💡 8월 알프스 여정 대비 현금 흐름을 점검 중입니다.")
+with gauge_col:
+    # 달성률 단계별 색상 정의
+    # 0~50%: 빨강 / 50~80%: 주황 / 80~100%: 노랑 / 100~150%: 초록 / 150%+: 파랑
+    def gauge_color(val: float) -> str:
+        if val < 50:   return "#FF4B4B"
+        if val < 80:   return "#FF8C00"
+        if val < 100:  return "#FFD700"
+        if val < 150:  return "#7dffb0"
+        return "#87CEEB"
+
+    def gauge_label(val: float) -> str:
+        if val < 50:   return "⚠️ 위험 — 대폭 부족"
+        if val < 80:   return "🔶 주의 — 부족"
+        if val < 100:  return "🟡 근접 — 목표 미달"
+        if val < 150:  return "✅ 달성 — 목표 초과"
+        return "💎 우수 — 여유 충분"
+
+    g_color = gauge_color(achievement)
+    g_label = gauge_label(achievement)
+    # 게이지 최대값: 200% 고정 (초과 달성도 표시)
+    g_max   = 200
+
+    fig_gauge = go.Figure(go.Indicator(
+        mode="gauge+number+delta",
+        value=achievement,
+        number=dict(suffix="%", font=dict(size=40, color=g_color)),
+        delta=dict(
+            reference=100,
+            suffix="%p",
+            increasing=dict(color="#7dffb0"),
+            decreasing=dict(color="#FF4B4B"),
+        ),
+        gauge=dict(
+            axis=dict(
+                range=[0, g_max],
+                tickwidth=1,
+                tickcolor="rgba(255,255,255,0.3)",
+                tickfont=dict(color="rgba(255,255,255,0.5)", size=10),
+                dtick=50,
+            ),
+            bar=dict(color=g_color, thickness=0.25),
+            bgcolor="rgba(255,255,255,0.03)",
+            borderwidth=0,
+            steps=[
+                dict(range=[0,   50],  color="rgba(255,75,75,0.12)"),
+                dict(range=[50,  80],  color="rgba(255,140,0,0.12)"),
+                dict(range=[80,  100], color="rgba(255,215,0,0.12)"),
+                dict(range=[100, 150], color="rgba(125,255,176,0.12)"),
+                dict(range=[150, 200], color="rgba(135,206,235,0.12)"),
+            ],
+            threshold=dict(
+                line=dict(color="white", width=2),
+                thickness=0.8,
+                value=100,
+            ),
+        ),
+        title=dict(
+            text=f"목표 달성률<br><span style='font-size:0.85rem; color:{g_color};'>{g_label}</span>",
+            font=dict(size=15, color="rgba(255,255,255,0.85)"),
+        ),
+    ))
+    fig_gauge.update_layout(
+        height=280,
+        paper_bgcolor="rgba(0,0,0,0)",
+        font_color="white",
+        margin=dict(t=60, b=10, l=30, r=30),
+    )
+    st.plotly_chart(fig_gauge, use_container_width=True)
+
+    # 단계 범례
+    st.markdown("""
+        <div style='display:flex; flex-wrap:wrap; gap:6px; font-size:0.78rem; margin-top:-8px;'>
+            <span style='background:rgba(255,75,75,0.15); padding:3px 8px; border-radius:10px;
+                         border:1px solid rgba(255,75,75,0.4); color:#FF4B4B;'>0~50% 위험</span>
+            <span style='background:rgba(255,140,0,0.15); padding:3px 8px; border-radius:10px;
+                         border:1px solid rgba(255,140,0,0.4); color:#FF8C00;'>50~80% 주의</span>
+            <span style='background:rgba(255,215,0,0.15); padding:3px 8px; border-radius:10px;
+                         border:1px solid rgba(255,215,0,0.4); color:#FFD700;'>80~100% 근접</span>
+            <span style='background:rgba(125,255,176,0.15); padding:3px 8px; border-radius:10px;
+                         border:1px solid rgba(125,255,176,0.4); color:#7dffb0;'>100~150% 달성</span>
+            <span style='background:rgba(135,206,235,0.15); padding:3px 8px; border-radius:10px;
+                         border:1px solid rgba(135,206,235,0.4); color:#87CEEB;'>150%+ 우수</span>
+        </div>
+    """, unsafe_allow_html=True)
+
+with metric_col:
+    st.markdown("#### 📊 현황 요약")
+    with st.container(border=True):
+        # 월 수입 vs 목표
+        surplus = display_income - target_monthly
+        surplus_color = "#7dffb0" if surplus >= 0 else "#FF4B4B"
+        surplus_label = "여유" if surplus >= 0 else "부족"
+        st.markdown(
+            f"<div style='display:flex; justify-content:space-between; "
+            f"padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.06);'>"
+            f"<span style='color:rgba(255,255,255,0.6);'>월 {'세후' if show_tax else '세전'} 수입</span>"
+            f"<span style='font-weight:700;'>{display_income:,.0f}원</span></div>"
+
+            f"<div style='display:flex; justify-content:space-between; "
+            f"padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.06);'>"
+            f"<span style='color:rgba(255,255,255,0.6);'>목표 생활비</span>"
+            f"<span style='font-weight:700;'>{target_monthly:,.0f}원</span></div>"
+
+            f"<div style='display:flex; justify-content:space-between; "
+            f"padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.06);'>"
+            f"<span style='color:rgba(255,255,255,0.6);'>월 {surplus_label}액</span>"
+            f"<span style='font-weight:700; color:{surplus_color};'>{surplus:+,.0f}원</span></div>"
+
+            f"<div style='display:flex; justify-content:space-between; "
+            f"padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.06);'>"
+            f"<span style='color:rgba(255,255,255,0.6);'>총 세전 수입</span>"
+            f"<span style='font-weight:700;'>{total_income:,.0f}원</span></div>"
+
+            f"<div style='display:flex; justify-content:space-between; "
+            f"padding:8px 0;'>"
+            f"<span style='color:rgba(255,255,255,0.6);'>총 공제액 (실효 {tax_result['실효세율']:.1f}%)</span>"
+            f"<span style='font-weight:700; color:#FF4B4B;'>-{tax_result['총_공제액']:,.0f}원</span></div>",
+            unsafe_allow_html=True,
+        )
+
+    st.info("💡 8월 알프스 여정 대비 현금 흐름을 점검 중입니다.")
+
 st.divider()
 
 # ── 세후 상세 내역 + 파이차트 ──

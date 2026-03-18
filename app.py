@@ -136,10 +136,12 @@ st.markdown("""
 
 
 # ════════════════════════════════════════════════════════
-# 2. 구글 시트 로드
+# 2. 구글 시트 로드 + 데이터 처리
 # ════════════════════════════════════════════════════════
-@st.cache_data(ttl=DATA_TTL)
+
+@st.cache_data(ttl=DATA_TTL, show_spinner=False)
 def load_sheet(url: str, gid: str = "919720494") -> pd.DataFrame:
+    """공개 구글 시트 CSV export URL로 직접 읽기 (캐시 5분)"""
     match = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
     if not match:
         raise ValueError("올바른 구글 시트 URL이 아닙니다.")
@@ -150,34 +152,91 @@ def load_sheet(url: str, gid: str = "919720494") -> pd.DataFrame:
     )
     return pd.read_csv(csv_url)
 
-with st.status("📋 구글 시트 연결 중...", expanded=False) as status:
+
+@st.cache_data(ttl=DATA_TTL, show_spinner=False)
+def load_and_validate(url: str, gid: str) -> tuple[pd.DataFrame, list[str]]:
+    """시트 로드 + 유효성 검사 결과를 캐시해 반환"""
+    df     = load_sheet(url, gid)
+    errors = validate_df(df)
+    return df, errors
+
+
+def extract_values(df: pd.DataFrame) -> dict:
+    """DataFrame에서 모든 설정값을 추출해 dict로 반환"""
+    return {
+        "public_pension":   safe_get(df, "공적연금"),
+        "irp_total":        safe_get(df, "IRP"),
+        "isa_total":        safe_get(df, "ISA"),
+        "general_total":    safe_get(df, "일반",         default=0.0),
+        "target_monthly":   safe_get(df, "목표생활비",   default=1.0),
+        "default_palantir": safe_get(df, "IRP기본분배율", default=1.2),
+        "default_kodex":    safe_get(df, "ISA기본분배율", default=0.8),
+        "default_general":  safe_get(df, "일반기본분배율", default=0.1),
+    }
+
+
+# ── 5단계 로딩 진행률 ────────────────────────────────────
+with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as _status:
+
+    # STEP 1 — 구글 시트 연결
+    st.write("📋 구글 시트 연결 중...")
     try:
-        df = load_sheet(SHEET_URL)
-        status.update(label="✅ 데이터 로드 완료", state="complete")
-    except Exception as e:
-        status.update(label="❌ 연결 실패", state="error")
-        st.error(f"구글 시트 읽기 오류: {e}")
+        df, _errors = load_and_validate(SHEET_URL, "919720494")
+    except Exception as _e:
+        _status.update(label="❌ 연결 실패", state="error")
+        st.error(f"구글 시트 읽기 오류: {_e}")
+        st.info(
+            "체크리스트\n"
+            "1. 시트 공유 설정이 **링크가 있는 모든 사용자 → 뷰어** 인지 확인\n"
+            f"2. 워크시트 탭 이름이 정확히 **{WORKSHEET_NAME}** 인지 확인\n"
+            "3. 시트 URL이 올바른지 확인"
+        )
         st.stop()
 
-errors = validate_df(df)
-if errors:
-    st.error("📋 시트 데이터 오류")
-    for err in errors:
-        st.warning(f"• {err}")
-    with st.expander("현재 시트 미리보기"):
-        st.dataframe(df)
-    st.stop()
+    # STEP 2 — 데이터 유효성 검사
+    st.write("🔍 데이터 유효성 검사 중...")
+    if _errors:
+        _status.update(label="❌ 시트 데이터 오류", state="error")
+        st.error("📋 시트 데이터 오류")
+        for _err in _errors:
+            st.warning(f"• {_err}")
+        with st.expander("현재 시트 미리보기"):
+            st.dataframe(df)
+        st.info(
+            f"구글 시트에 아래 항목이 '항목' 컬럼에 정확히 있어야 합니다:\n"
+            + "\n".join(f"• {item}" for item in REQUIRED_ITEMS)
+        )
+        st.stop()
 
+    # STEP 3 — 값 추출
+    st.write("🔢 수치 데이터 파싱 중...")
+    _vals = extract_values(df)
 
-# ════════════════════════════════════════════════════════
-# 3. 값 추출
-# ════════════════════════════════════════════════════════
-public_pension   = safe_get(df, "공적연금")
-irp_total        = safe_get(df, "IRP")
-isa_total        = safe_get(df, "ISA")
-target_monthly   = safe_get(df, "목표생활비", default=1.0)
-default_palantir = safe_get(df, "IRP기본분배율", default=1.2)
-default_kodex    = safe_get(df, "ISA기본분배율", default=0.8)
+    # STEP 4 — 현금흐름 계산
+    st.write("💰 현금흐름 계산 중...")
+    public_pension   = _vals["public_pension"]
+    irp_total        = _vals["irp_total"]
+    isa_total        = _vals["isa_total"]
+    general_total    = _vals["general_total"]
+    target_monthly   = _vals["target_monthly"]
+    default_palantir = _vals["default_palantir"]
+    default_kodex    = _vals["default_kodex"]
+    default_general  = _vals["default_general"]
+
+    # STEP 5 — 캐시 상태 확인
+    st.write("✨ 준비 완료...")
+    _cache_info = (
+        "🔄 새로 로드됨"
+        if not st.session_state.get("_data_loaded")
+        else f"⚡ 캐시 사용 중 (갱신 주기: {DATA_TTL})"
+    )
+    st.session_state["_data_loaded"] = True
+
+    _status.update(
+        label=f"✅ 데이터 로드 완료  ·  {_cache_info}",
+        state="complete",
+        expanded=False,
+    )
 
 
 # ════════════════════════════════════════════════════════
@@ -204,6 +263,8 @@ with st.sidebar:
     st.divider()
     if st.button("🔄 데이터 갱신", use_container_width=True):
         load_sheet.clear()
+        load_and_validate.clear()
+        st.session_state.pop("_data_loaded", None)
         st.rerun()
     st.caption(f"워크시트: {WORKSHEET_NAME} · 캐시: {DATA_TTL}")
 
@@ -1151,8 +1212,8 @@ hm_years = st.slider(
 )
 
 # 일반 계좌 분배율 (사이드바 또는 기본값)
-general_total = safe_get(df, "일반", default=0.0)
-default_general = safe_get(df, "일반기본분배율", default=0.1)
+general_total   = _vals["general_total"]    # extract_values에서 이미 추출
+default_general = _vals["default_general"]  # extract_values에서 이미 추출
 
 with st.sidebar:
     st.divider()

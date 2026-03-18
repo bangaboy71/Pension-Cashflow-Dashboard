@@ -305,6 +305,28 @@ with st.sidebar:
     ) / 100
 
     st.divider()
+    st.subheader("🎯 목표 생활비 조정")
+    # 시트값 기준 ±200% 범위, 10만원 단위 조정
+    _tgt_base = float(target_monthly)
+    target_monthly = st.slider(
+        "월 목표 생활비 (만원)",
+        min_value=int(_tgt_base * 0.3 / 10000),
+        max_value=int(_tgt_base * 2.5 / 10000),
+        value=int(_tgt_base / 10000),
+        step=10,
+        key="target_slider",
+    ) * 10000   # 만원 → 원 단위로 환산
+    # 시트값 대비 변동 표시
+    _tgt_delta = target_monthly - _tgt_base
+    if abs(_tgt_delta) > 0:
+        st.caption(
+            f"시트 기준값 {_tgt_base/10000:.0f}만원 대비 "
+            f"**{_tgt_delta/10000:+.0f}만원**"
+        )
+    else:
+        st.caption(f"시트 기준값 그대로 적용 중")
+
+    st.divider()
     st.subheader("⚙️ 세금 옵션")
     show_tax = st.toggle("세후 실수령액 표시", value=True)
     use_health_ins = st.toggle("건강보험료 포함", value=True)
@@ -463,7 +485,10 @@ with metric_col:
             f"<div style='display:flex; justify-content:space-between; "
             f"padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.06);'>"
             f"<span style='color:rgba(255,255,255,0.6);'>목표 생활비</span>"
-            f"<span style='font-weight:700;'>{target_monthly:,.0f}원</span></div>"
+            f"<span style='font-weight:700;'>{target_monthly:,.0f}원"
+            + (f" <span style='font-size:0.78rem; color:#FFD700;'>({_tgt_delta/10000:+.0f}만)</span>"
+               if abs(_tgt_delta) > 0 else "")
+            + f"</span></div>"
 
             f"<div style='display:flex; justify-content:space-between; "
             f"padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.06);'>"

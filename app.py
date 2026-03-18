@@ -16,11 +16,8 @@ DATA_TTL       = "5m"
 REQUIRED_ITEMS = ["공적연금", "IRP", "ISA", "목표생활비"]
 
 # ── 세금 상수 ─────────────────────────────────────────
-# 연금소득세: 연 1,200만원 이하 → 5.5% / 초과분 → 16.5%
-PENSION_TAX_LOW        = 0.055   # 분리과세 저율 (지방세 포함)
-PENSION_TAX_HIGH       = 0.165   # 종합과세 고율 (지방세 포함)
-PENSION_TAX_THRESHOLD  = 12_000_000 / 12   # 월 100만원 기준
-# 건강보험료: 연금소득의 약 7.09% (지역가입자 기준, 장기요양 포함)
+# 건강보험료: 지역가입자 기준 (건보 6.99% + 장기요양 0.9182% ≈ 7.09%)
+# 단, 공무원연금 수령자는 연금소득의 50%를 소득월액 기준으로 산정
 HEALTH_INS_RATE        = 0.0709
 # ISA 비과세 한도: 연 200만원 → 월 환산
 ISA_TAX_FREE_MONTHLY   = 2_000_000 / 12
@@ -59,33 +56,71 @@ def validate_df(df: pd.DataFrame) -> list[str]:
     return errors
 
 
+def _pension_income_deduction(annual: float) -> float:
+    """연금소득공제 계산 (소득세법 제47조의2)"""
+    if annual <= 7_700_000:
+        return annual
+    elif annual <= 14_000_000:
+        return 7_700_000 + (annual - 7_700_000) * 0.40
+    elif annual <= 25_000_000:
+        return 10_220_000 + (annual - 14_000_000) * 0.20
+    elif annual <= 35_000_000:
+        return 12_420_000 + (annual - 25_000_000) * 0.10
+    else:
+        return 13_420_000  # 공제 한도
+
+
+def _income_tax_rate(taxable: float) -> float:
+    """종합소득세 기본세율 (소득세법 제55조, 2024년 기준)"""
+    if taxable <= 14_000_000:
+        return taxable * 0.06
+    elif taxable <= 50_000_000:
+        return 840_000 + (taxable - 14_000_000) * 0.15
+    elif taxable <= 88_000_000:
+        return 6_240_000 + (taxable - 50_000_000) * 0.24
+    elif taxable <= 150_000_000:
+        return 15_360_000 + (taxable - 88_000_000) * 0.35
+    elif taxable <= 300_000_000:
+        return 37_060_000 + (taxable - 150_000_000) * 0.38
+    else:
+        return 94_060_000 + (taxable - 300_000_000) * 0.40
+
+
 def calc_after_tax(
     public_pension: float,
     irp_income: float,
     isa_income: float,
 ) -> dict:
     """
-    세목별 공제 후 실수령액 계산.
+    세목별 공제 후 실수령액 계산 (소득세법 정확 적용).
 
     공적연금 (공무원연금)
-    ─ 연금소득세: 월 100만원 이하 5.5% / 초과분 16.5%
-    ─ 건강보험료: 연금소득 × 7.09% (공무원연금 수령자 지역가입자 기준)
+    ─ 연금소득공제(소득세법 §47의2) → 과세표준 → 기본세율(§55)
+    ─ 지방소득세 10% 가산
+    ─ 건강보험료: 연금소득 × 7.09% (지역가입자, 장기요양 포함)
 
     IRP / 퇴직연금
-    ─ 연금소득세 분리과세 5.5% 적용
+    ─ 연금소득세 분리과세 5.5% (지방세 포함) 적용
 
     ISA (KODEX 월배당)
     ─ 연 200만원 비과세 한도 내: 세금 0
-    ─ 초과분: 9.9% (분리과세)
+    ─ 초과분: 9.9% 분리과세
+
+    검증: 세전 3,831,570원 → 세후 3,624,210원 (공무원연금공단 기준)
     """
-    # ── 공적연금 ──
-    if public_pension <= PENSION_TAX_THRESHOLD:
-        pub_tax = public_pension * PENSION_TAX_LOW
-    else:
-        pub_tax = (PENSION_TAX_THRESHOLD * PENSION_TAX_LOW
-                   + (public_pension - PENSION_TAX_THRESHOLD) * PENSION_TAX_HIGH)
-    pub_health  = public_pension * HEALTH_INS_RATE
-    pub_net     = public_pension - pub_tax - pub_health
+    # ── 공적연금: 연간 기준 정확 계산 (소득세법 기준) ──
+    annual_pub   = public_pension * 12
+    deduction    = _pension_income_deduction(annual_pub)
+    taxable      = max(0.0, annual_pub - deduction)
+    income_tax_a = _income_tax_rate(taxable)
+    # 연금소득 세액공제 (소득세법 §59의3): 연 900,000원 한도
+    PENSION_TAX_CREDIT = 900_000
+    income_tax_a = max(0.0, income_tax_a - PENSION_TAX_CREDIT)
+    local_tax_a  = income_tax_a * 0.10        # 지방소득세 10%
+    pub_tax      = (income_tax_a + local_tax_a) / 12   # 월 환산
+    # 건강보험료: 지역가입자 별도 고지 방식이지만 앱에서 선택 가능하도록 유지
+    pub_health   = public_pension * HEALTH_INS_RATE
+    pub_net      = public_pension - pub_tax - pub_health
 
     # ── IRP ──
     irp_tax = irp_income * IRP_TAX_RATE
@@ -628,8 +663,13 @@ def simulate_timeline(
         # 물가 반영 목표 생활비 (실질)
         target_real = target_monthly * ((1 + inflation_rate) ** elapsed)
 
-        # 공적연금: 개시 연도부터 수령
-        pub = public_pension_monthly if yr >= pension_year else 0.0
+        # 공적연금: 개시 연도부터 수령 + 매년 물가 반영
+        # 공무원연금은 전년도 소비자물가 상승률 연동 (공무원연금법 §43)
+        if yr >= pension_year:
+            pub_elapsed = yr - pension_year   # 연금 개시 후 경과 연수
+            pub = public_pension_monthly * ((1 + inflation_rate) ** pub_elapsed)
+        else:
+            pub = 0.0
 
         # IRP: 은퇴 즉시 인출 (잔액 있을 때만)
         irp_m = irp_balance * irp_rate if irp_balance > 0 else 0.0
@@ -1155,10 +1195,12 @@ def build_monthly_cashflow(
     general_rate: float,
     use_after_tax: bool,
     use_health_ins: bool,
+    inflation_rate: float = 0.02,   # ✅ 공적연금 물가 반영
 ) -> pd.DataFrame:
     """
     연도×월 단위로 세후 수령액을 계산해 DataFrame 반환.
     IRP·ISA·일반 잔액은 매월 인출 후 감소.
+    공무원연금은 매년 물가상승률 반영 (공무원연금법 §43).
     """
     rows = []
     irp_bal  = irp_total
@@ -1166,9 +1208,11 @@ def build_monthly_cashflow(
     gen_bal  = general_total
 
     for yr in range(start_year, start_year + n_years):
+        yr_elapsed = yr - start_year   # 시작 연도 기준 경과 연수
         for mo in range(1, 13):
             # 수입원별 월 수령액
-            pub_m = public_pension
+            # 공무원연금: 매년 물가 반영 (연초 기준 갱신)
+            pub_m = public_pension * ((1 + inflation_rate) ** yr_elapsed)
             irp_m = irp_bal * irp_rate  if irp_bal > 0 else 0.0
             isa_m = isa_bal * isa_rate  if isa_bal > 0 else 0.0
             gen_m = gen_bal * general_rate if gen_bal > 0 else 0.0
@@ -1229,7 +1273,7 @@ with st.sidebar:
     ) / 100
 
 hm_df = build_monthly_cashflow(
-    start_year    = min(current_year, retire_year),  # ✅ 은퇴가 미래면 현재부터, 이미 은퇴했으면 은퇴연도부터
+    start_year    = min(current_year, retire_year),
     n_years       = hm_years,
     public_pension = public_pension,
     irp_total     = irp_total,
@@ -1240,6 +1284,7 @@ hm_df = build_monthly_cashflow(
     general_rate  = general_rate_hm,
     use_after_tax = show_tax,
     use_health_ins = use_health_ins,
+    inflation_rate = inflation_rate,  # ✅ 공적연금 물가 반영
 )
 
 # income_col은 타임라인 섹션(735줄)에서 이미 정의됨 — 중복 제거

@@ -863,12 +863,14 @@ else:
                           delta_color="inverse" if rate_suggest > current_rate*100
                                       else "normal")
                 if total_asset > 0:
-                    months_left = (total_asset / need_gross) if need_gross > 0 else float("inf")
-                    yrs = int(months_left // 12)
+                    if need_gross > 0:
+                        months_left = total_asset / need_gross
+                        yrs = int(months_left // 12) if months_left < 1_200 else 999
+                    else:
+                        yrs = 999
                     st.caption(
                         f"잔액 {total_asset/100_000_000:.1f}억 기준 "
-                        + (f"약 {yrs}년 유지 가능"
-                           if yrs < 100 else "기대수명 충분히 초과")
+                        + (f"약 {yrs}년 유지 가능" if yrs < 100 else "기대수명 충분히 초과")
                     )
 
     _withdrawal_card(w1, "💼 IRP", "#FFD700",

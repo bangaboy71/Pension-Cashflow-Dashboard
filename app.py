@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import plotly.express as px
+import re
+import requests
 
 # ── 설정 상수 ────────────────────────────────────────────
-WORKSHEET_NAME   = "연금현황"      # 구글 시트 워크시트명 (실제 시트명으로 변경)
-DATA_TTL         = "5m"           # 캐시 갱신 주기
-REQUIRED_ITEMS   = ["공적연금", "IRP", "ISA", "목표생활비"]  # 필수 항목
+# ✅ 구글 시트 공개 URL 직접 지정 (Secrets 불필요)
+SHEET_URL      = "https://docs.google.com/spreadsheets/d/14e_0SQaBFbyEC-16hEEqvrJfdVXob20b3MLJ2Cn60Do"
+WORKSHEET_NAME = "연금현황"
+DATA_TTL       = "5m"
+REQUIRED_ITEMS = ["공적연금", "IRP", "ISA", "목표생활비"]
 
 # ── 헬퍼 함수 ────────────────────────────────────────────
 
@@ -50,22 +53,54 @@ def validate_df(df: pd.DataFrame) -> list[str]:
 # ── 1. 페이지 설정 ───────────────────────────────────────
 st.set_page_config(page_title="연금 현금흐름 관제탑", layout="wide")
 
-# ── 2. 구글 시트 연결 ────────────────────────────────────
-conn = st.connection("gsheets", type=GSheetsConnection)
+# ── 2. 구글 시트 직접 읽기 (Secrets·서비스 계정 불필요) ──
+# 공개 URL을 CSV export 형식으로 변환해서 pandas로 직접 읽음
+import re
+
+@st.cache_data(ttl=DATA_TTL)
+def load_sheet(url: str, sheet_name: str) -> pd.DataFrame:
+    """공개 구글 시트를 pandas로 직접 읽기"""
+    # 시트 ID 추출
+    match = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
+    if not match:
+        raise ValueError("올바른 구글 시트 URL이 아닙니다.")
+    sheet_id = match.group(1)
+
+    # gid(탭 ID) 조회용 URL로 시트 목록 가져오기
+    # 탭 이름으로 gid를 찾아 CSV URL 생성
+    meta_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
+    try:
+        import requests
+        resp = requests.get(meta_url, timeout=5)
+        gid_match = re.search(
+            rf'"name":"{re.escape(sheet_name)}".*?"sheetId":(\d+)', resp.text
+        )
+        if gid_match:
+            gid = gid_match.group(1)
+        else:
+            gid = "0"  # 첫 번째 탭 기본값
+    except Exception:
+        gid = "0"
+
+    csv_url = (
+        f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+        f"/export?format=csv&gid={gid}"
+    )
+    df = pd.read_csv(csv_url)
+    return df
 
 with st.status("📋 구글 시트 연결 중...", expanded=False) as status:
     try:
-        # ✅ 워크시트명 명시 + TTL 캐시 적용
-        df = conn.read(worksheet=WORKSHEET_NAME, ttl=DATA_TTL)
+        df = load_sheet(SHEET_URL, WORKSHEET_NAME)
         status.update(label="✅ 데이터 로드 완료", state="complete")
     except Exception as e:
         status.update(label="❌ 연결 실패", state="error")
-        st.error(f"구글 시트 연결 오류: {e}")
+        st.error(f"구글 시트 읽기 오류: {e}")
         st.info(
             "체크리스트:\n"
-            "1. `secrets.toml`의 `spreadsheet` URL이 올바른지 확인\n"
-            "2. 시트 공유 설정이 '링크가 있는 모든 사용자 → 뷰어' 이상인지 확인\n"
-            f"3. 워크시트 이름이 **{WORKSHEET_NAME}** 인지 확인 (대소문자·공백 주의)"
+            "1. 시트 공유 설정이 **링크가 있는 모든 사용자 → 뷰어** 인지 확인\n"
+            f"2. 워크시트 탭 이름이 정확히 **{WORKSHEET_NAME}** 인지 확인\n"
+            "3. 시트 URL이 올바른지 확인"
         )
         st.stop()
 
@@ -111,7 +146,7 @@ with st.sidebar:
 
     st.divider()
     if st.button("🔄 데이터 갱신", use_container_width=True):
-        st.cache_data.clear()
+        load_sheet.clear()
         st.rerun()
     st.caption(f"워크시트: {WORKSHEET_NAME} · 캐시: {DATA_TTL}")
 

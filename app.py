@@ -58,31 +58,13 @@ st.set_page_config(page_title="연금 현금흐름 관제탑", layout="wide")
 import re
 
 @st.cache_data(ttl=DATA_TTL)
-def load_sheet(url: str, sheet_name: str) -> pd.DataFrame:
-    """공개 구글 시트를 pandas로 직접 읽기"""
-    # 시트 ID 추출
+def load_sheet(url: str, gid: str = "919720494") -> pd.DataFrame:
+    """공개 구글 시트를 pandas로 직접 읽기 (gid로 탭 고정)"""
     match = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
     if not match:
         raise ValueError("올바른 구글 시트 URL이 아닙니다.")
     sheet_id = match.group(1)
-
-    # gid(탭 ID) 조회용 URL로 시트 목록 가져오기
-    # 탭 이름으로 gid를 찾아 CSV URL 생성
-    meta_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
-    try:
-        import requests
-        resp = requests.get(meta_url, timeout=5)
-        gid_match = re.search(
-            rf'"name":"{re.escape(sheet_name)}".*?"sheetId":(\d+)', resp.text
-        )
-        if gid_match:
-            gid = gid_match.group(1)
-        else:
-            gid = "0"  # 첫 번째 탭 기본값
-    except Exception:
-        gid = "0"
-
-    csv_url = (
+    csv_url  = (
         f"https://docs.google.com/spreadsheets/d/{sheet_id}"
         f"/export?format=csv&gid={gid}"
     )
@@ -91,7 +73,7 @@ def load_sheet(url: str, sheet_name: str) -> pd.DataFrame:
 
 with st.status("📋 구글 시트 연결 중...", expanded=False) as status:
     try:
-        df = load_sheet(SHEET_URL, WORKSHEET_NAME)
+        df = load_sheet(SHEET_URL)
         status.update(label="✅ 데이터 로드 완료", state="complete")
     except Exception as e:
         status.update(label="❌ 연결 실패", state="error")

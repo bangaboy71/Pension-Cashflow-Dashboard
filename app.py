@@ -659,6 +659,270 @@ if not shortage_yrs.empty:
 else:
     st.success("✅ 기대수명까지 목표 생활비를 충분히 충당할 수 있습니다.")
 
+
+# ════════════════════════════════════════════════════════
+# IRP·ISA 잔액 고갈 시뮬레이션
+# ════════════════════════════════════════════════════════
+st.divider()
+st.markdown("## 💰 IRP·ISA 잔액 고갈 시뮬레이션")
+st.caption("분배율 변화에 따라 자산이 언제 고갈되는지, 3가지 시나리오로 비교합니다.")
+
+def simulate_balance(
+    irp_total: float, isa_total: float,
+    irp_rate: float, isa_rate: float,
+    retire_year: int, end_year: int,
+) -> pd.DataFrame:
+    """연도별 IRP·ISA 잔액 시뮬레이션 — 단일 시나리오"""
+    rows = []
+    irp_bal = irp_total
+    isa_bal = isa_total
+    for yr in range(retire_year, end_year + 1):
+        irp_m = irp_bal * irp_rate if irp_bal > 0 else 0.0
+        isa_m = isa_bal * isa_rate if isa_bal > 0 else 0.0
+        irp_bal = max(0.0, irp_bal - irp_m * 12)
+        isa_bal = max(0.0, isa_bal - isa_m * 12)
+        rows.append({
+            "연도": yr,
+            "나이": yr - birth_year,
+            "IRP잔액": irp_bal,
+            "ISA잔액": isa_bal,
+            "IRP월수익": irp_m,
+            "ISA월수익": isa_m,
+        })
+    return pd.DataFrame(rows)
+
+# ── 시나리오 설정 ─────────────────────────────────────
+with st.expander("⚙️ 시나리오 분배율 설정", expanded=False):
+    sc1, sc2, sc3 = st.columns(3)
+    with sc1:
+        st.markdown("**🔴 비관 시나리오**")
+        irp_bear = st.slider("IRP 비관 (%)", 0.5, 2.0,
+                             max(0.5, float(default_palantir) - 0.5), 0.1,
+                             key="irp_bear") / 100
+        isa_bear = st.slider("ISA 비관 (%)", 0.3, 1.5,
+                             max(0.3, float(default_kodex) - 0.3), 0.1,
+                             key="isa_bear") / 100
+    with sc2:
+        st.markdown("**🟡 기본 시나리오**")
+        irp_base = st.slider("IRP 기본 (%)", 0.5, 2.0,
+                             float(default_palantir), 0.1,
+                             key="irp_base") / 100
+        isa_base = st.slider("ISA 기본 (%)", 0.3, 1.5,
+                             float(default_kodex), 0.1,
+                             key="isa_base") / 100
+    with sc3:
+        st.markdown("**🟢 낙관 시나리오**")
+        irp_bull = st.slider("IRP 낙관 (%)", 0.5, 2.0,
+                             min(2.0, float(default_palantir) + 0.5), 0.1,
+                             key="irp_bull") / 100
+        isa_bull = st.slider("ISA 낙관 (%)", 0.3, 1.5,
+                             min(1.5, float(default_kodex) + 0.3), 0.1,
+                             key="isa_bull") / 100
+
+# ── 3 시나리오 시뮬레이션 ─────────────────────────────
+scenarios = {
+    "🔴 비관": (irp_bear, isa_bear),
+    "🟡 기본": (irp_base, isa_base),
+    "🟢 낙관": (irp_bull, isa_bull),
+}
+sc_colors = {
+    "🔴 비관": ("#FF4B4B", "rgba(255,75,75,0.15)"),
+    "🟡 기본": ("#FFD700", "rgba(255,215,0,0.15)"),
+    "🟢 낙관": ("#7dffb0", "rgba(125,255,176,0.15)"),
+}
+sc_dfs = {
+    name: simulate_balance(irp_total, isa_total, ir, isar, retire_year, end_year)
+    for name, (ir, isar) in scenarios.items()
+}
+
+def find_exhaust(df: pd.DataFrame, col: str):
+    mask = df[col] <= 0
+    if mask.any():
+        row = df[mask].iloc[0]
+        return int(row["연도"]), int(row["나이"])
+    return None, None
+
+# ── 고갈 시점 요약 카드 ───────────────────────────────
+st.markdown("#### 📌 시나리오별 고갈 시점")
+hd_cols = st.columns(3)
+for i, (sc_name, sc_df) in enumerate(sc_dfs.items()):
+    irp_yr, irp_age = find_exhaust(sc_df, "IRP잔액")
+    isa_yr, isa_age = find_exhaust(sc_df, "ISA잔액")
+    line_color = sc_colors[sc_name][0]
+    with hd_cols[i]:
+        with st.container(border=True):
+            st.markdown(
+                f"<div style='font-size:1rem; font-weight:700; "
+                f"color:{line_color}; margin-bottom:8px;'>{sc_name}</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"**IRP:** "
+                + (f"{irp_yr}년 ({irp_age}세, {irp_yr - retire_year}년 후)"
+                   if irp_yr else "✅ 기대수명까지 유지")
+            )
+            st.markdown(
+                f"**ISA:** "
+                + (f"{isa_yr}년 ({isa_age}세, {isa_yr - retire_year}년 후)"
+                   if isa_yr else "✅ 기대수명까지 유지")
+            )
+            irp_rate_pct = scenarios[sc_name][0] * 100
+            isa_rate_pct = scenarios[sc_name][1] * 100
+            st.caption(f"IRP {irp_rate_pct:.1f}% / ISA {isa_rate_pct:.1f}%")
+
+st.divider()
+
+# ── IRP 잔액 추이 차트 ────────────────────────────────
+bal_tab1, bal_tab2 = st.tabs(["💼 IRP 잔액 추이", "📦 ISA 잔액 추이"])
+
+for tab, asset, bal_col, inc_col, asset_color in [
+    (bal_tab1, "IRP", "IRP잔액", "IRP월수익", "#FFD700"),
+    (bal_tab2, "ISA", "ISA잔액", "ISA월수익", "#FF4B4B"),
+]:
+    with tab:
+        fig_bal = go.Figure()
+
+        # 시나리오별 잔액 라인
+        for sc_name, sc_df in sc_dfs.items():
+            line_c, fill_c = sc_colors[sc_name]
+            exhaust_yr, exhaust_age = find_exhaust(sc_df, bal_col)
+
+            fig_bal.add_trace(go.Scatter(
+                x=sc_df["연도"],
+                y=sc_df[bal_col] / 100_000_000,
+                name=sc_name,
+                mode="lines",
+                line=dict(color=line_c, width=2.5),
+                fill="tozeroy",
+                fillcolor=fill_c,
+                hovertemplate=(
+                    f"{sc_name}<br>"
+                    "%{x}년: %{y:.2f}억원<extra></extra>"
+                ),
+            ))
+
+            # 고갈 시점 마커
+            if exhaust_yr:
+                fig_bal.add_vline(
+                    x=exhaust_yr,
+                    line_dash="dot",
+                    line_color=line_c,
+                    line_width=1.5,
+                    annotation_text=f"{sc_name} 고갈<br>{exhaust_yr}년 ({exhaust_age}세)",
+                    annotation_position="top",
+                    annotation_font_color=line_c,
+                    annotation_font_size=11,
+                )
+
+        fig_bal.update_layout(
+            height=380,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(255,255,255,0.02)",
+            font_color="white",
+            legend=dict(orientation="h", yanchor="bottom",
+                        y=-0.25, xanchor="center", x=0.5),
+            margin=dict(t=20, b=80, l=10, r=10),
+            yaxis=dict(title=f"{asset} 잔액 (억원)", tickformat=".2f"),
+            xaxis=dict(title="연도", dtick=2),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_bal, use_container_width=True)
+
+        # 월 수익 추이 (보조 차트)
+        st.markdown(f"**📈 {asset} 월 수익 추이 (시나리오별)**")
+        fig_inc = go.Figure()
+        for sc_name, sc_df in sc_dfs.items():
+            line_c, _ = sc_colors[sc_name]
+            fig_inc.add_trace(go.Scatter(
+                x=sc_df["연도"],
+                y=sc_df[inc_col] / 10000,
+                name=sc_name,
+                mode="lines",
+                line=dict(color=line_c, width=2),
+                hovertemplate=f"{sc_name}: %{{y:,.1f}}만원<extra></extra>",
+            ))
+        fig_inc.update_layout(
+            height=220,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(255,255,255,0.02)",
+            font_color="white",
+            showlegend=False,
+            margin=dict(t=10, b=40, l=10, r=10),
+            yaxis=dict(title="월 수익 (만원)", tickformat=","),
+            xaxis=dict(dtick=2),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_inc, use_container_width=True)
+
+# ── 통합 잔액 (IRP+ISA) 비교 ─────────────────────────
+st.divider()
+st.markdown("#### 🔗 IRP + ISA 통합 잔액 시나리오 비교")
+
+fig_total_bal = go.Figure()
+for sc_name, sc_df in sc_dfs.items():
+    line_c, fill_c = sc_colors[sc_name]
+    total_bal = sc_df["IRP잔액"] + sc_df["ISA잔액"]
+    exhaust_mask = total_bal <= 0
+    exhaust_yr_total = sc_df[exhaust_mask]["연도"].min() if exhaust_mask.any() else None
+
+    fig_total_bal.add_trace(go.Scatter(
+        x=sc_df["연도"],
+        y=total_bal / 100_000_000,
+        name=sc_name,
+        mode="lines",
+        line=dict(color=line_c, width=3),
+        hovertemplate=f"{sc_name}: %{{y:.2f}}억원<extra></extra>",
+    ))
+    if exhaust_yr_total:
+        exhaust_age_total = exhaust_yr_total - birth_year
+        fig_total_bal.add_annotation(
+            x=exhaust_yr_total,
+            y=0,
+            text=f"{sc_name}<br>완전 고갈<br>{exhaust_yr_total}년({exhaust_age_total}세)",
+            showarrow=True,
+            arrowhead=2,
+            arrowcolor=line_c,
+            font=dict(color=line_c, size=11),
+            bgcolor="rgba(0,0,0,0.6)",
+            bordercolor=line_c,
+            borderwidth=1,
+        )
+
+fig_total_bal.add_hline(y=0, line_color="rgba(255,255,255,0.2)", line_width=1)
+fig_total_bal.update_layout(
+    height=350,
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(255,255,255,0.02)",
+    font_color="white",
+    legend=dict(orientation="h", yanchor="bottom",
+                y=-0.25, xanchor="center", x=0.5),
+    margin=dict(t=10, b=80, l=10, r=10),
+    yaxis=dict(title="통합 잔액 (억원)", tickformat=".2f"),
+    xaxis=dict(title="연도", dtick=2),
+    hovermode="x unified",
+)
+st.plotly_chart(fig_total_bal, use_container_width=True)
+
+# 시나리오별 요약 인사이트
+ins1, ins2, ins3 = st.columns(3)
+for ins_col, (sc_name, sc_df) in zip([ins1, ins2, ins3], sc_dfs.items()):
+    line_c = sc_colors[sc_name][0]
+    total_bal_last = sc_df["IRP잔액"].iloc[-1] + sc_df["ISA잔액"].iloc[-1]
+    total_income_sum = (sc_df["IRP월수익"] + sc_df["ISA월수익"]).sum()
+    with ins_col:
+        st.markdown(
+            f"<div style='background:rgba(255,255,255,0.03); padding:12px; "
+            f"border-radius:8px; border-left:3px solid {line_c};'>"
+            f"<div style='color:{line_c}; font-weight:700; margin-bottom:6px;'>{sc_name}</div>"
+            f"<div style='font-size:0.85rem; color:rgba(255,255,255,0.6);'>기대수명 시 잔액</div>"
+            f"<div style='font-size:1.1rem; font-weight:700;'>{total_bal_last/100_000_000:.2f}억원</div>"
+            f"<div style='font-size:0.85rem; color:rgba(255,255,255,0.6); margin-top:6px;'>총 수령액 (월 합계)</div>"
+            f"<div style='font-size:1.1rem; font-weight:700;'>{total_income_sum/10000:,.0f}만원</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+
 # ── 연도별 상세 테이블 ────────────────────────────────
 with st.expander("📋 연도별 상세 데이터 보기"):
     display_tl = tl_df[[

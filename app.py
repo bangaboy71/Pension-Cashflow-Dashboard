@@ -154,6 +154,117 @@ def calc_after_tax(
 
 
 # ════════════════════════════════════════════════════════
+def calc_withdrawal_plan(
+    target_monthly: float,
+    public_pension_net: float,
+    irp_total: float,
+    isa_total: float,
+    general_total: float,
+    irp_weight: float,
+    isa_weight: float,
+    general_weight: float,
+    use_after_tax: bool,
+    use_health_ins: bool,
+) -> dict:
+    """
+    목표 생활비를 충당하기 위한 계좌별 필요 인출액 역산.
+
+    흐름
+    ────
+    1. 공무원연금(세후)으로 우선 충당
+    2. 부족분을 IRP·ISA·일반 가중치 비율로 배분
+    3. 각 계좌별 필요 인출 원금(세전) 역산
+    4. 원금 대비 분배율(%) 계산 → 슬라이더 권장값 제시
+    5. 해당 분배율로 실제 달성 가능 여부 검증
+
+    반환값 (dict)
+    ─────────────
+    shortage          : 공무원연금 충당 후 월 부족액
+    irp_need_gross    : IRP 필요 인출액 (세전)
+    isa_need_gross    : ISA 필요 인출액 (세전)
+    gen_need_gross    : 일반 필요 인출액 (세전)
+    irp_rate_suggest  : IRP 권장 분배율 (%)
+    isa_rate_suggest  : ISA 권장 분배율 (%)
+    gen_rate_suggest  : 일반 권장 분배율 (%)
+    total_net_est     : 달성 예상 세후 합계
+    gap               : 목표 대비 잉여/부족
+    feasible          : 목표 달성 가능 여부
+    """
+    # 공무원연금 세후 계산 (건보료 옵션 반영)
+    _tr_pub = calc_after_tax(public_pension_net, 0, 0)
+    pub_net = _tr_pub["공적연금_세후"]
+    if not use_health_ins:
+        pub_net += _tr_pub["공적연금_건보료"]
+
+    # 공무원연금으로 충당 후 부족분
+    shortage = max(0.0, target_monthly - pub_net)
+
+    if shortage <= 0:
+        # 연금만으로 목표 달성
+        return {
+            "shortage":         0.0,
+            "irp_need_gross":   0.0,
+            "isa_need_gross":   0.0,
+            "gen_need_gross":   0.0,
+            "irp_rate_suggest": 0.0,
+            "isa_rate_suggest": 0.0,
+            "gen_rate_suggest": 0.0,
+            "total_net_est":    pub_net,
+            "gap":              pub_net - target_monthly,
+            "feasible":         True,
+        }
+
+    # 가중치 합 정규화
+    total_w = irp_weight + isa_weight + general_weight
+    if total_w <= 0:
+        total_w = 1.0
+        irp_weight = isa_weight = general_weight = 1/3
+
+    # 부족분을 가중치 비율로 각 계좌에 배분 (세후 목표)
+    irp_need_net = shortage * (irp_weight / total_w)
+    isa_need_net = shortage * (isa_weight / total_w)
+    gen_need_net = shortage * (general_weight / total_w)
+
+    # 세전 역산 (세금률 반영)
+    irp_need_gross = irp_need_net / (1 - IRP_TAX_RATE)
+    # ISA: 비과세 한도 고려
+    if isa_need_net <= ISA_TAX_FREE_MONTHLY * (1 - 0.099):
+        isa_need_gross = isa_need_net   # 비과세 범위 내
+    else:
+        isa_need_gross = ISA_TAX_FREE_MONTHLY + (
+            (isa_need_net - ISA_TAX_FREE_MONTHLY) / (1 - 0.099)
+        )
+    gen_need_gross = gen_need_net / (1 - 0.154)   # 배당소득세 15.4%
+
+    # 분배율 역산 (원금 대비 %)
+    irp_rate_s = (irp_need_gross / irp_total * 100) if irp_total > 0 else 0.0
+    isa_rate_s = (isa_need_gross / isa_total * 100) if isa_total > 0 else 0.0
+    gen_rate_s = (gen_need_gross / general_total * 100) if general_total > 0 else 0.0
+
+    # 검증: 역산된 분배율로 실제 세후 합계
+    irp_income_v = irp_total * (irp_rate_s / 100)
+    isa_income_v = isa_total * (isa_rate_s / 100)
+    gen_income_v = general_total * (gen_rate_s / 100)
+    gen_tax_v    = gen_income_v * 0.154
+    tr_v = calc_after_tax(public_pension_net, irp_income_v, isa_income_v)
+    if not use_health_ins:
+        tr_v["총_세후"] += tr_v["공적연금_건보료"]
+    total_net_v = tr_v["총_세후"] + (gen_income_v - gen_tax_v)
+
+    return {
+        "shortage":         shortage,
+        "irp_need_gross":   irp_need_gross,
+        "isa_need_gross":   isa_need_gross,
+        "gen_need_gross":   gen_need_gross,
+        "irp_rate_suggest": min(irp_rate_s, 5.0),   # 월 5% 상한
+        "isa_rate_suggest": min(isa_rate_s, 5.0),
+        "gen_rate_suggest": min(gen_rate_s, 2.0),
+        "total_net_est":    total_net_v,
+        "gap":              total_net_v - target_monthly,
+        "feasible":         total_net_v >= target_monthly * 0.99,
+    }
+
+
 # 1. 페이지 설정
 # ════════════════════════════════════════════════════════
 st.set_page_config(page_title="연금 현금흐름 관제탑", layout="wide")
@@ -332,6 +443,13 @@ with st.sidebar:
     use_health_ins = st.toggle("건강보험료 포함", value=True)
 
     st.divider()
+    st.subheader("🔧 계좌별 인출 비중")
+    st.caption("목표 부족분을 각 계좌에서 얼마씩 충당할지 비율을 설정합니다.")
+    irp_weight = st.slider("IRP 비중", 0, 10, 5, 1, key="irp_w")
+    isa_weight = st.slider("ISA 비중", 0, 10, 3, 1, key="isa_w")
+    gen_weight = st.slider("일반 비중", 0, 10, 2, 1, key="gen_w")
+
+    st.divider()
     if st.button("🔄 데이터 갱신", use_container_width=True):
         load_sheet.clear()
         load_and_validate.clear()
@@ -350,7 +468,6 @@ total_income = public_pension + irp_income + isa_income
 # 세후 계산
 tax_result = calc_after_tax(public_pension, irp_income, isa_income)
 if not use_health_ins:
-    # 건보료 제외 옵션
     tax_result["공적연금_세후"]  += tax_result["공적연금_건보료"]
     tax_result["총_세후"]        += tax_result["공적연금_건보료"]
     tax_result["총_공제액"]      -= tax_result["공적연금_건보료"]
@@ -361,6 +478,20 @@ if not use_health_ins:
 
 display_income = tax_result["총_세후"] if show_tax else total_income
 achievement    = (display_income / target_monthly) * 100 if target_monthly > 0 else 0
+
+# ── 목표 달성 역산 계획 ──────────────────────────────────
+withdrawal_plan = calc_withdrawal_plan(
+    target_monthly   = target_monthly,
+    public_pension_net = public_pension,
+    irp_total        = irp_total,
+    isa_total        = isa_total,
+    general_total    = general_total,
+    irp_weight       = float(irp_weight),
+    isa_weight       = float(isa_weight),
+    general_weight   = float(gen_weight),
+    use_after_tax    = show_tax,
+    use_health_ins   = use_health_ins,
+)
 
 
 # ════════════════════════════════════════════════════════
@@ -510,6 +641,101 @@ with metric_col:
     st.info("💡 8월 알프스 여정 대비 현금 흐름을 점검 중입니다.")
 
 st.divider()
+
+# ── 계좌별 인출 계획 섹션 ────────────────────────────────
+st.markdown("#### 🏦 목표 생활비 달성을 위한 계좌별 인출 조정 플랜")
+st.caption(
+    "목표 생활비 변동 시 각 계좌에서 얼마를 인출해야 하는지 자동 계산합니다. "
+    "사이드바 **계좌별 인출 비중** 슬라이더로 IRP·ISA·일반 배분 비율을 조정하세요."
+)
+
+wp = withdrawal_plan
+_surplus_col = "#7dffb0" if wp["gap"] >= 0 else "#FF4B4B"
+_surplus_lbl = "여유" if wp["gap"] >= 0 else "부족"
+
+if wp["shortage"] <= 0:
+    st.success(
+        f"✅ 공무원연금({tax_result['공적연금_세후']:,.0f}원)만으로 "
+        f"목표 생활비를 충당할 수 있습니다. "
+        f"월 **{abs(wp['gap']):,.0f}원** 여유"
+    )
+else:
+    # 부족분 요약
+    sh1, sh2, sh3 = st.columns(3)
+    sh1.metric("공무원연금 세후", f"{tax_result['공적연금_세후']:,.0f}원")
+    sh2.metric("월 부족분",
+               f"{wp['shortage']:,.0f}원",
+               delta=f"목표 {target_monthly/10000:.0f}만원 기준",
+               delta_color="inverse")
+    sh3.metric("달성 예상 세후",
+               f"{wp['total_net_est']:,.0f}원",
+               delta=f"{wp['gap']:+,.0f}원",
+               delta_color="normal" if wp["gap"] >= 0 else "inverse")
+
+    st.markdown("**각 계좌별 필요 인출액 및 권장 분배율**")
+    w1, w2, w3 = st.columns(3)
+
+    def _withdrawal_card(col, label, color, need_gross, rate_suggest,
+                         total_asset, current_rate):
+        with col:
+            with st.container(border=True):
+                st.markdown(
+                    f"<div style='color:{color}; font-weight:700; "
+                    f"font-size:0.95rem; margin-bottom:8px;'>{label}</div>",
+                    unsafe_allow_html=True,
+                )
+                st.metric("필요 인출액(월)", f"{need_gross:,.0f}원")
+                st.metric("권장 분배율",
+                          f"{rate_suggest:.2f}%",
+                          delta=f"현재 {current_rate*100:.2f}% 대비 "
+                                f"{rate_suggest - current_rate*100:+.2f}%p",
+                          delta_color="inverse" if rate_suggest > current_rate*100
+                                      else "normal")
+                if total_asset > 0:
+                    months_left = (total_asset / need_gross) if need_gross > 0 else float("inf")
+                    yrs = int(months_left // 12)
+                    st.caption(
+                        f"잔액 {total_asset/100_000_000:.1f}억 기준 "
+                        + (f"약 {yrs}년 유지 가능"
+                           if yrs < 100 else "기대수명 충분히 초과")
+                    )
+
+    _withdrawal_card(w1, "💼 IRP", "#FFD700",
+                     wp["irp_need_gross"], wp["irp_rate_suggest"],
+                     irp_total, palantir_rate)
+    _withdrawal_card(w2, "📦 ISA", "#FF4B4B",
+                     wp["isa_need_gross"], wp["isa_rate_suggest"],
+                     isa_total, kodex_rate)
+    # 일반 계좌는 히트맵 사이드바에서 설정한 분배율 사용
+    # (사이드바 순서상 아직 정의 전일 수 있으므로 session_state로 안전하게 읽기)
+    _gen_rate_now = float(st.session_state.get("general_rate_hm", 0.001))
+    _withdrawal_card(w3, "💵 일반", "#87CEEB",
+                     wp["gen_need_gross"], wp["gen_rate_suggest"],
+                     general_total, _gen_rate_now)
+
+    # 권장 분배율 적용 시 고갈 시점 간단 추정
+    with st.expander("📊 권장 분배율 적용 시 고갈 예상", expanded=False):
+        ec1, ec2 = st.columns(2)
+        _start_yr = datetime.now().year   # ✅ 하드코딩 제거
+        for col, asset_name, asset_val, rate_s in [
+            (ec1, "IRP", irp_total, wp["irp_rate_suggest"] / 100),
+            (ec2, "ISA", isa_total, wp["isa_rate_suggest"] / 100),
+        ]:
+            if asset_val > 0 and rate_s > 0:
+                bal  = asset_val
+                year = _start_yr
+                while bal > 0 and year < 2100:
+                    bal = max(0.0, bal - bal * rate_s * 12)
+                    year += 1
+                exhaust_age = year - int(birth_year)  # ✅ birth_year int 변환
+                col.metric(
+                    f"{asset_name} 고갈 시점",
+                    f"{year}년 ({exhaust_age}세)" if year < 2100 else "고갈 없음",
+                    delta=f"{year - _start_yr}년 후" if year < 2100 else "✅ 충분",
+                    delta_color="inverse" if year < 2100 else "normal",
+                )
+            else:
+                col.metric(f"{asset_name} 고갈 시점", "해당 없음")
 
 # ── 세후 상세 내역 + 파이차트 ──
 col1, col2 = st.columns([1, 1])

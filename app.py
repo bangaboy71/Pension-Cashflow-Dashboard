@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -632,11 +633,11 @@ def simulate_timeline(
 
         # IRP: 은퇴 즉시 인출 (잔액 있을 때만)
         irp_m = irp_balance * irp_rate if irp_balance > 0 else 0.0
-        irp_balance = max(0, irp_balance - irp_m * 12)  # 연간 인출 후 잔액
+        irp_balance = max(0.0, irp_balance - irp_m)  # 월 수익 차감 (월 단위)
 
         # ISA: 은퇴 즉시 인출 (잔액 있을 때만)
         isa_m = isa_balance * isa_rate if isa_balance > 0 else 0.0
-        isa_balance = max(0, isa_balance - isa_m * 12)
+        isa_balance = max(0.0, isa_balance - isa_m)  # 월 수익 차감
 
         gross_m = pub + irp_m + isa_m
 
@@ -778,7 +779,7 @@ fig_tl.update_layout(
 st.plotly_chart(fig_tl, use_container_width=True)
 
 # 단계 범례 설명
-lc1, lc2, lc3 = st.columns(3)
+lc2, lc3 = st.columns(2)  # ✅ lc1 미사용 컬럼 제거
 lc2.markdown(
     "<div style='background:rgba(255,215,0,0.1); padding:8px 12px; border-radius:8px;"
     " border-left:3px solid #FFD700; font-size:0.85rem;'>"
@@ -841,6 +842,7 @@ def simulate_balance(
     irp_total: float, isa_total: float,
     irp_rate: float, isa_rate: float,
     retire_year: int, end_year: int,
+    birth_year: int = 1971,   # ✅ 전역변수 직접 참조 제거 — 인자로 수신
 ) -> pd.DataFrame:
     """연도별 IRP·ISA 잔액 시뮬레이션 — 단일 시나리오"""
     rows = []
@@ -849,7 +851,7 @@ def simulate_balance(
     for yr in range(retire_year, end_year + 1):
         irp_m = irp_bal * irp_rate if irp_bal > 0 else 0.0
         isa_m = isa_bal * isa_rate if isa_bal > 0 else 0.0
-        irp_bal = max(0.0, irp_bal - irp_m * 12)
+        irp_bal = max(0.0, irp_bal - irp_m * 12)  # 연간 인출 (고갈 시뮬레이션용)
         isa_bal = max(0.0, isa_bal - isa_m * 12)
         rows.append({
             "연도": yr,
@@ -901,7 +903,8 @@ sc_colors = {
     "🟢 낙관": ("#7dffb0", "rgba(125,255,176,0.15)"),
 }
 sc_dfs = {
-    name: simulate_balance(irp_total, isa_total, ir, isar, retire_year, end_year)
+    name: simulate_balance(irp_total, isa_total, ir, isar, retire_year, end_year,
+                           birth_year=birth_year)  # ✅ birth_year 명시 전달
     for name, (ir, isar) in scenarios.items()
 }
 
@@ -1204,7 +1207,7 @@ def build_monthly_cashflow(
     return pd.DataFrame(rows)
 
 # ── 히트맵 설정 ──────────────────────────────────────────
-current_year = 2026
+current_year = datetime.now().year  # ✅ 하드코딩 제거 — 실행 시점 연도 자동 반영
 hm_years = st.slider(
     "히트맵 표시 연수",
     min_value=3, max_value=30, value=10, step=1,
@@ -1226,7 +1229,7 @@ with st.sidebar:
     ) / 100
 
 hm_df = build_monthly_cashflow(
-    start_year    = current_year,
+    start_year    = min(current_year, retire_year),  # ✅ 은퇴가 미래면 현재부터, 이미 은퇴했으면 은퇴연도부터
     n_years       = hm_years,
     public_pension = public_pension,
     irp_total     = irp_total,
@@ -1239,8 +1242,7 @@ hm_df = build_monthly_cashflow(
     use_health_ins = use_health_ins,
 )
 
-income_col = "세후합계" if show_tax else "세전합계"
-
+# income_col은 타임라인 섹션(735줄)에서 이미 정의됨 — 중복 제거
 # ── 히트맵 차트 ─────────────────────────────────────────
 years_list = sorted(hm_df["연도"].unique())
 months_kr  = ["1월","2월","3월","4월","5월","6월",

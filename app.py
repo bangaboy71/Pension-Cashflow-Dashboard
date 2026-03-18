@@ -160,7 +160,20 @@ st.set_page_config(page_title="연금 현금흐름 관제탑", layout="wide")
 
 st.markdown("""
 <style>
-[data-testid="stMetricValue"] { font-size:1.5rem !important; font-weight:700 !important; }
+/* ── 제목 크기 조정 ── */
+[data-testid="stAppViewContainer"] h1,
+.stTitle  { font-size:1.4rem !important; font-weight:600 !important; }
+[data-testid="stAppViewContainer"] h2 { font-size:1.15rem !important; font-weight:600 !important; }
+[data-testid="stAppViewContainer"] h3 { font-size:1.0rem  !important; font-weight:600 !important; }
+[data-testid="stAppViewContainer"] h4 { font-size:0.9rem  !important; font-weight:600 !important; }
+[data-testid="stHeader"]    { font-size:1.05rem !important; }
+[data-testid="stSubheader"] { font-size:0.95rem !important; }
+
+/* ── 메트릭 ── */
+[data-testid="stMetricValue"] { font-size:1.4rem !important; font-weight:700 !important; }
+[data-testid="stMetricLabel"] { font-size:0.78rem !important; }
+
+/* ── 세금 내역 행 ── */
 .tax-row { display:flex; justify-content:space-between; padding:6px 0;
            border-bottom:1px solid rgba(255,255,255,0.06); font-size:0.88rem; }
 .tax-label { color:rgba(255,255,255,0.6); }
@@ -331,7 +344,11 @@ achievement    = (display_income / target_monthly) * 100 if target_monthly > 0 e
 # ════════════════════════════════════════════════════════
 # 6. 메인 화면
 # ════════════════════════════════════════════════════════
-st.title("🚀 연금자산 현금흐름 관제탑")
+st.markdown(
+    "<h1 style='font-size:1.4rem; font-weight:700; margin-bottom:0.3rem;'>"
+    "🚀 연금자산 현금흐름 관제탑</h1>",
+    unsafe_allow_html=True,
+)
 
 tax_label = "세후 " if show_tax else "세전 "
 st.markdown(

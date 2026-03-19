@@ -25,6 +25,54 @@ ISA_TAX_FREE_MONTHLY   = 2_000_000 / 12
 IRP_TAX_RATE           = 0.055
 
 
+def calc_target_expense(
+    age: int,
+    base: float,
+    retire_age: int,
+    life_exp: int,
+    mode: str = "peak_converge",
+    peak_age: int = 70,
+    peak_amount: float = 7_000_000,
+    end_amount: float | None = None,
+    inflation_rate: float = 0.02,
+) -> float:
+    """
+    연령별 목표 생활비 계산 — 피크-수렴형 + 상한캡 혼합 (방안 B+C).
+
+    mode="peak_converge"
+    ────────────────────
+    은퇴(base) → 피크 연령(peak_amount) → 기대수명(end_amount) 구간을 선형 보간.
+    물가 상승분은 base에 이미 반영되어 있다고 가정 (외부에서 물가 적용 후 전달).
+
+    Parameters
+    ──────────
+    age          : 현재 나이
+    base         : 은퇴 시 목표 생활비 (원)
+    retire_age   : 은퇴 나이
+    life_exp     : 기대 수명
+    peak_age     : 생활비 최대 연령 (기본 70세)
+    peak_amount  : 피크 시 생활비 (기본 700만원)
+    end_amount   : 기대수명 시 생활비 (None이면 base와 동일)
+    inflation_rate: 물가상승률 (공적연금 연동용, 목표생활비 직접 적용 안 함)
+    """
+    if end_amount is None:
+        end_amount = base
+
+    # 상한 캡 적용
+    peak_amount = min(peak_amount, 7_000_000)
+
+    if age <= retire_age:
+        return base
+    elif age <= peak_age:
+        # 은퇴 → 피크: 선형 증가
+        ratio = (age - retire_age) / max(peak_age - retire_age, 1)
+        return base + (peak_amount - base) * ratio
+    else:
+        # 피크 → 기대수명: 선형 감소
+        ratio = (age - peak_age) / max(life_exp - peak_age, 1)
+        return peak_amount - (peak_amount - end_amount) * ratio
+
+
 # ════════════════════════════════════════════════════════
 # 헬퍼 함수
 # ════════════════════════════════════════════════════════
@@ -1074,6 +1122,49 @@ with st.sidebar:
     life_exp       = st.number_input("기대 수명",  value=90,  min_value=70,   max_value=100,  step=1)
     inflation_rate = st.slider("물가상승률 (%)", min_value=0.0, max_value=5.0, value=2.0, step=0.1) / 100
 
+    st.divider()
+    st.subheader("📈 생활비 패턴 설정")
+    st.caption("고령화에 따른 소비 변화를 반영합니다.")
+    expense_mode = st.radio(
+        "목표생활비 적용 방식",
+        ["📈 피크-수렴형 (권장)", "📊 물가 상승만 (단순)"],
+        key="expense_mode",
+        help="피크-수렴형: 액티브 시기 증가→고령기 감소 / 물가 상승: 단순 연동",
+    )
+    _use_peak = (expense_mode == "📈 피크-수렴형 (권장)")
+
+    if _use_peak:
+        peak_age_input = st.slider(
+            "생활비 최대 연령",
+            min_value=int(retire_age) + 5,
+            max_value=int(life_exp) - 5,
+            value=70, step=1,
+            help="이 나이에 생활비가 최대가 됩니다 (여행·활동 등 액티브 피크)",
+        )
+        peak_amount_input = st.slider(
+            "최대 생활비 (만원)",
+            min_value=int(target_monthly / 10000),
+            max_value=700,
+            value=700, step=10,
+            help="최대 700만원 상한 적용",
+        ) * 10_000
+        end_ratio_input = st.slider(
+            "기대수명 시 생활비 비율 (%)",
+            min_value=50, max_value=100,
+            value=80, step=5,
+            help="기대수명 시 생활비를 현재 목표의 몇 %로 설정할지 (의료비↑, 활동비↓)",
+        ) / 100
+        end_amount_input = target_monthly * end_ratio_input
+        st.caption(
+            f"패턴: {int(retire_age)}세 {target_monthly/10000:.0f}만 → "
+            f"{peak_age_input}세 {peak_amount_input/10000:.0f}만 → "
+            f"{int(life_exp)}세 {end_amount_input/10000:.0f}만원"
+        )
+    else:
+        peak_age_input    = 70
+        peak_amount_input = 7_000_000
+        end_amount_input  = None
+
 # ── 기본 연도 계산 ────────────────────────────────────
 current_year   = 2026
 retire_year    = birth_year + retire_age
@@ -1095,6 +1186,10 @@ def simulate_timeline(
     target_monthly: float,
     inflation_rate: float,
     use_after_tax: bool,
+    use_peak: bool = False,
+    peak_age: int = 70,
+    peak_amount: float = 7_000_000,
+    end_amount: float | None = None,
 ) -> pd.DataFrame:
     rows = []
     irp_balance = irp_total
@@ -1104,8 +1199,20 @@ def simulate_timeline(
         age = yr - birth_year
         elapsed = yr - retire_year   # 은퇴 후 경과 연수
 
-        # 물가 반영 목표 생활비 (실질)
-        target_real = target_monthly * ((1 + inflation_rate) ** elapsed)
+        # 목표 생활비: 피크-수렴형 or 단순 물가
+        if use_peak:
+            target_real = calc_target_expense(
+                age          = age,
+                base         = target_monthly,
+                retire_age   = retire_age,
+                life_exp     = life_exp,
+                peak_age     = peak_age,
+                peak_amount  = peak_amount,
+                end_amount   = end_amount,
+                inflation_rate = inflation_rate,
+            )
+        else:
+            target_real = target_monthly * ((1 + inflation_rate) ** elapsed)
 
         # 공적연금: 개시 연도부터 수령 + 매년 물가 반영
         # 공무원연금은 전년도 소비자물가 상승률 연동 (공무원연금법 §43)
@@ -1166,6 +1273,10 @@ tl_df = simulate_timeline(
     target_monthly = target_monthly,
     inflation_rate = inflation_rate,
     use_after_tax  = show_tax,
+    use_peak       = _use_peak,
+    peak_age       = peak_age_input,
+    peak_amount    = peak_amount_input,
+    end_amount     = end_amount_input,
 )
 
 # ── 핵심 이벤트 요약 카드 ─────────────────────────────
@@ -1234,7 +1345,11 @@ fig_tl.add_trace(go.Bar(
 # 목표 생활비 라인
 fig_tl.add_trace(go.Scatter(
     x=tl_df["연도"], y=tl_df["목표생활비(실질)"] / 10000,
-    name=f"목표생활비 (물가{inflation_rate*100:.1f}% 반영)",
+    name=(
+        f"목표생활비 (피크-수렴형 | 물가{inflation_rate*100:.1f}%)"
+        if _use_peak
+        else f"목표생활비 (물가{inflation_rate*100:.1f}% 반영)"
+    ),
     line=dict(color="white", width=2, dash="dot"),
     mode="lines",
 ))

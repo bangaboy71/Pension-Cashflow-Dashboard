@@ -14,7 +14,7 @@ SHEET_URL      = "https://docs.google.com/spreadsheets/d/14e_0SQaBFbyEC-16hEEqvr
 WORKSHEET_NAME = "연금현황"
 DATA_TTL            = "5m"
 REQUIRED_ITEMS      = ["공적연금", "IRP", "ISA", "목표생활비"]
-SCENARIO_SHEET_GID  = "시나리오"   # ← 시나리오 탭 gid 입력 (없으면 기능 비활성화)
+SCENARIO_SHEET_GID  = "961920932"   # ← 시나리오 탭 gid 입력 (없으면 기능 비활성화)
 
 # ── 세금 상수 ─────────────────────────────────────────
 # 건강보험료: 지역가입자 기준 (건보 6.99% + 장기요양 0.9182% ≈ 7.09%)

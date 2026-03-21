@@ -14,7 +14,7 @@ SHEET_URL      = "https://docs.google.com/spreadsheets/d/14e_0SQaBFbyEC-16hEEqvr
 WORKSHEET_NAME = "연금현황"
 DATA_TTL            = "5m"
 REQUIRED_ITEMS      = ["공적연금", "IRP", "ISA", "목표생활비"]
-SCENARIO_SHEET_GID  = "961920932"   # ← 시나리오 탭 gid 입력 (없으면 기능 비활성화)
+SCENARIO_SHEET_GID  = ""   # ← 시나리오 탭 gid(숫자) 입력. 탭이 없으면 직접 작성 모드만 활성화
 
 # ── 세금 상수 ─────────────────────────────────────────
 # 건강보험료: 지역가입자 기준 (건보 6.99% + 장기요양 0.9182% ≈ 7.09%)
@@ -368,9 +368,10 @@ def load_scenarios(url: str, gid: str) -> pd.DataFrame:
     """
     구글 시트 '시나리오' 탭 로드.
     헤더: 시나리오명 | 계좌 | 종목명 | 원금 | 분배율(%) | 메모
-    gid 미설정 시 빈 DataFrame 반환.
+    gid 미설정 또는 숫자가 아닌 값 입력 시 빈 DataFrame 반환.
     """
-    if not gid:
+    # gid는 숫자 문자열이어야 함 — 탭 이름 등 잘못된 값 방어
+    if not gid or not str(gid).strip().isdigit():
         return pd.DataFrame()
     try:
         import re as _re
@@ -507,10 +508,14 @@ with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as
     irp_dps_default  = _vals["irp_dps_default"]
     isa_dps_default  = _vals["isa_dps_default"]
 
-    # STEP 5 — 시나리오 탭 로드
+    # STEP 5 — 시나리오 탭 로드 (실패해도 앱 중단 없음)
     st.write("🎯 시나리오 데이터 로드 중...")
-    sc_df = load_scenarios(SHEET_URL, SCENARIO_SHEET_GID)
-    sc_names = sc_df["시나리오명"].unique().tolist() if not sc_df.empty else []
+    try:
+        sc_df    = load_scenarios(SHEET_URL, SCENARIO_SHEET_GID)
+        sc_names = sc_df["시나리오명"].unique().tolist() if not sc_df.empty else []
+    except Exception:
+        sc_df    = pd.DataFrame()
+        sc_names = []
 
     st.write("✨ 준비 완료...")
     _cache_info = (

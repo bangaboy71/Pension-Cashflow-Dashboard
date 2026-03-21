@@ -1357,15 +1357,25 @@ st.divider()
 st.markdown("## 📅 연도별 수령 타임라인")
 st.caption("은퇴부터 기대수명까지 수입원이 어떻게 바뀌는지 한눈에 확인합니다.")
 
-# ── 타임라인 파라미터 (사이드바) ─────────────────────
+# ── 타임라인 파라미터 ────────────────────────────────
+# 고정값 (확정): 출생연도 1971 / 은퇴 55세 / 공무원연금 개시 55세 / 기대수명 90세
+birth_year  = 1971
+retire_age  = 55
+pension_age = 55
+life_exp    = 90
+
 with st.sidebar:
     st.divider()
-    st.subheader("📅 타임라인 설정")
-    birth_year     = st.number_input("출생 연도", value=1971, min_value=1950, max_value=1985, step=1, key="birth_year_input")
-    retire_age     = st.number_input("은퇴 나이",  value=55,  min_value=50,   max_value=75,   step=1)
-    pension_age    = st.number_input("공무원연금 개시 나이", value=55, min_value=50, max_value=70, step=1)
-    life_exp       = st.number_input("기대 수명",  value=90,  min_value=70,   max_value=100,  step=1)
-    inflation_rate = st.slider("물가상승률 (%)", min_value=0.0, max_value=5.0, value=2.0, step=0.1) / 100
+    st.subheader("📅 타임라인")
+    inflation_rate = st.slider(
+        "물가상승률 (%)",
+        min_value=0.0, max_value=5.0, value=2.0, step=0.1,
+        help="공적연금 물가 연동 및 목표생활비 실질 계산에 적용",
+    ) / 100
+    st.caption(
+        f"출생 {birth_year}년 · 은퇴 {retire_age}세 · "
+        f"공무원연금 {pension_age}세 개시 · 기대수명 {life_exp}세"
+    )
 
     st.divider()
     st.subheader("📈 생활비 패턴 설정")

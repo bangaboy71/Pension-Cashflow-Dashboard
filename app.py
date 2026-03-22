@@ -2548,45 +2548,177 @@ with _main_tab1:
         st.markdown("**각 계좌별 필요 인출액 및 권장 분배율**")
         w1, w2, w3 = st.columns(3)
 
-        def _withdrawal_card(col, label, color, need_gross, rate_suggest,
-                             total_asset, current_rate):
+        # ── 수량 조정 데이터 준비 ─────────────────────────
+        _irp_shares_cur  = float(st.session_state.get("irp_shares_input",
+                                  _vals.get("irp_shares", 0)))
+        _isa_shares_cur  = float(st.session_state.get("isa_shares_input",
+                                  _vals.get("isa_shares", 0)))
+        _irp_dps_cur     = float(st.session_state.get("irp_dps", _vals.get("irp_dps_default", 0)))
+        _isa_dps_cur     = float(st.session_state.get("isa_dps", _vals.get("isa_dps_default", 0)))
+
+        # ── 계좌간 원금 조정 분석 ─────────────────────────
+        # 세후 효율 비교: ISA > IRP (ISA 비과세 한도 내)
+        _total_invest    = irp_total + isa_total + general_total
+        _irp_eff         = 1 - IRP_TAX_RATE           # 0.945
+        _isa_eff         = 1 - 0.0                    # 비과세 한도 내
+        _gen_eff         = 1 - 0.154                  # 0.846
+
+        # ── 관심종목 탭 연계 — 목표 분배율 달성 가능 종목 ─
+        _wl_suggestions  = []
+        if not wl_df.empty and "월분배율(%)" in wl_df.columns:
+            for _, _wr in wl_df.iterrows():
+                _wn   = str(_wr.get("종목명",""))
+                _wacc = str(_wr.get("계좌",""))
+                _wrat = float(_wr.get("월분배율(%)", 0))
+                if _wrat > 0:
+                    _wl_suggestions.append({
+                        "종목명": _wn, "계좌": _wacc, "분배율": _wrat,
+                    })
+
+        def _withdrawal_card_v2(col, label, color,
+                                need_gross, rate_suggest, total_asset,
+                                current_rate, actual_income,
+                                shares_cur=0, dps_cur=0,
+                                acc_key="irp"):
             with col:
                 with st.container(border=True):
+                    # 헤더
                     st.markdown(
                         f"<div style='color:{color}; font-weight:700; "
-                        f"font-size:0.95rem; margin-bottom:8px;'>{label}</div>",
+                        f"font-size:0.95rem; margin-bottom:6px;'>{label}</div>",
                         unsafe_allow_html=True,
                     )
-                    st.metric("필요 인출액(월)", f"{need_gross:,.0f}원")
+
+                    # ① 과부족 표시
+                    _surplus     = actual_income - need_gross
+                    _surplus_c   = "#7dffb0" if _surplus >= 0 else "#FF4B4B"
+                    _surplus_lbl = "여유" if _surplus >= 0 else "부족"
+
+                    r1, r2 = st.columns(2)
+                    r1.metric("지정 인출액", f"{need_gross:,.0f}원",
+                              help="목표 생활비 달성을 위해 이 계좌에서 필요한 세전 금액")
+                    r2.metric("실제 수령액", f"{actual_income:,.0f}원",
+                              delta=f"{_surplus:+,.0f}원 ({_surplus_lbl})",
+                              delta_color="normal" if _surplus >= 0 else "inverse")
+
+                    st.markdown(
+                        f"<div style='text-align:center; padding:4px 0; "
+                        f"border-radius:6px; font-size:0.82rem; font-weight:700; "
+                        f"background:rgba({"125,255,176" if _surplus>=0 else "255,75,75"},0.12);'>"
+                        f"{'✅' if _surplus>=0 else '⚠️'} "
+                        f"{'초과 ' if _surplus>=0 else '부족 '}"
+                        f"{abs(_surplus):,.0f}원</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                    st.divider()
+
+                    # ② 권장 분배율
+                    _rate_delta = rate_suggest - current_rate * 100
                     st.metric("권장 분배율",
                               f"{rate_suggest:.2f}%",
-                              delta=f"현재 {current_rate*100:.2f}% 대비 "
-                                    f"{rate_suggest - current_rate*100:+.2f}%p",
-                              delta_color="inverse" if rate_suggest > current_rate*100
-                                          else "normal")
-                    if total_asset > 0:
-                        if need_gross > 0:
-                            months_left = total_asset / need_gross
-                            yrs = int(months_left // 12) if months_left < 1_200 else 999
-                        else:
-                            yrs = 999
-                        st.caption(
-                            f"잔액 {total_asset/100_000_000:.1f}억 기준 "
-                            + (f"약 {yrs}년 유지 가능" if yrs < 100 else "기대수명 충분히 초과")
+                              delta=f"현재 {current_rate*100:.2f}% → {_rate_delta:+.2f}%p",
+                              delta_color="inverse" if _rate_delta > 0 else "normal")
+
+                    # ③ 수량 조정 방안
+                    if shares_cur > 0 and dps_cur > 0 and need_gross > 0:
+                        _shares_needed = int(need_gross / dps_cur)
+                        _shares_diff   = _shares_needed - int(shares_cur)
+                        _diff_lbl      = f"{'▲' if _shares_diff>0 else '▼'} {abs(_shares_diff):,}주"
+                        _diff_c        = "#FF4B4B" if _shares_diff > 0 else "#7dffb0"
+                        st.markdown(
+                            f"<div style='font-size:0.78rem; margin-top:2px;'>"
+                            f"<span style='color:rgba(255,255,255,0.5);'>수량 조정: </span>"
+                            f"{int(shares_cur):,}주 → {_shares_needed:,}주 "
+                            f"<span style='color:{_diff_c}; font-weight:700;'>"
+                            f"({_diff_lbl})</span></div>",
+                            unsafe_allow_html=True,
                         )
 
-        _withdrawal_card(w1, "💼 IRP", "#FFD700",
-                         wp["irp_need_gross"], wp["irp_rate_suggest"],
-                         irp_total, palantir_rate)
-        _withdrawal_card(w2, "📦 ISA", "#FF4B4B",
-                         wp["isa_need_gross"], wp["isa_rate_suggest"],
-                         isa_total, kodex_rate)
-        # 일반 계좌는 히트맵 사이드바에서 설정한 분배율 사용
-        # (사이드바 순서상 아직 정의 전일 수 있으므로 session_state로 안전하게 읽기)
-        _gen_rate_now = float(st.session_state.get("general_rate_hm", 0.001))
-        _withdrawal_card(w3, "💵 일반", "#87CEEB",
-                         wp["gen_need_gross"], wp["gen_rate_suggest"],
-                         general_total, _gen_rate_now)
+                    # ④ 잔액 유지 연수
+                    if total_asset > 0 and need_gross > 0:
+                        _months = total_asset / need_gross
+                        _yrs    = int(_months // 12) if _months < 1_200 else 999
+                        st.caption(
+                            f"잔액 {total_asset/100_000_000:.1f}억 · "
+                            + (f"약 {_yrs}년 유지" if _yrs < 100 else "기대수명 초과")
+                        )
+
+        # 실제 수령액 (세전 기준)
+        _gen_rate_now    = float(st.session_state.get("general_rate_hm", 0.001))
+        _gen_actual      = general_total * _gen_rate_now
+
+        _withdrawal_card_v2(
+            w1, "💼 IRP", "#FFD700",
+            wp["irp_need_gross"], wp["irp_rate_suggest"],
+            irp_total, palantir_rate, irp_income,
+            shares_cur=_irp_shares_cur, dps_cur=_irp_dps_cur, acc_key="irp",
+        )
+        _withdrawal_card_v2(
+            w2, "📦 ISA", "#FF4B4B",
+            wp["isa_need_gross"], wp["isa_rate_suggest"],
+            isa_total, kodex_rate, isa_income,
+            shares_cur=_isa_shares_cur, dps_cur=_isa_dps_cur, acc_key="isa",
+        )
+        _withdrawal_card_v2(
+            w3, "💵 일반", "#87CEEB",
+            wp["gen_need_gross"], wp["gen_rate_suggest"],
+            general_total, _gen_rate_now, _gen_actual,
+            acc_key="gen",
+        )
+
+        # ── 계좌간 원금 조정 제안 ────────────────────────
+        st.divider()
+        with st.expander("💡 최적화 제안", expanded=False):
+            # ② 계좌간 원금 조정
+            st.markdown("**계좌간 투자원금 조정**")
+            st.caption(
+                f"세후 효율: ISA({_isa_eff*100:.0f}%) > IRP({_irp_eff*100:.1f}%) > 일반({_gen_eff*100:.1f}%)  "
+                f"· 총 투자원금 {_total_invest/100_000_000:.2f}억원"
+            )
+            # ISA 비과세 한도(연 200만원) 기준 최적 배분
+            _isa_opt_for_tax_free = ISA_TAX_FREE_MONTHLY * 12 / (
+                float(_vals.get("default_kodex", 1.42)) / 100
+            ) if float(_vals.get("default_kodex", 1.42)) > 0 else 0
+            oc1, oc2, oc3 = st.columns(3)
+            oc1.metric("ISA 비과세 최적 원금",
+                       f"{_isa_opt_for_tax_free/100_000_000:.2f}억",
+                       delta=f"현재 {isa_total/100_000_000:.2f}억 대비 "
+                             f"{(_isa_opt_for_tax_free-isa_total)/10_000_000:+.0f}천만",
+                       help="ISA 연 200만원 비과세 한도를 정확히 소진하는 최적 원금")
+            oc2.metric("IRP 현재 원금",
+                       f"{irp_total/100_000_000:.2f}억",
+                       help="IRP는 연금소득세 5.5% 일괄 적용")
+            oc3.metric("총 세금 절감 가능",
+                       f"{(ISA_TAX_FREE_MONTHLY * 0.099):,.0f}원/월",
+                       help="ISA 비과세 한도 내 절감액")
+
+            # ③ 관심종목 탭 연계 신규 편입 제안
+            if _wl_suggestions:
+                st.divider()
+                st.markdown("**관심종목 편입 시 달성률 시뮬레이션**")
+                st.caption("관심종목 탭의 종목을 현재 계좌에 편입할 경우 예상 달성률입니다.")
+                _sug_cols = st.columns(min(len(_wl_suggestions), 3))
+                for _si, _sg in enumerate(_wl_suggestions[:3]):
+                    _sg_acc   = _sg["계좌"]
+                    _sg_bal   = {"IRP": irp_total,"ISA": isa_total,"일반": general_total}.get(_sg_acc, 0)
+                    _sg_gross = _sg_bal * _sg["분배율"] / 100
+                    _sg_tax   = IRP_TAX_RATE if _sg_acc in ["IRP","연금저축"] else 0.099
+                    _sg_net   = _sg_gross * (1 - _sg_tax) + public_pension
+                    _sg_ach   = _sg_net / target_monthly * 100 if target_monthly > 0 else 0
+                    _sg_c     = "#7dffb0" if _sg_ach >= 100 else "#FFD700" if _sg_ach >= 80 else "#FF4B4B"
+                    with _sug_cols[_si]:
+                        with st.container(border=True):
+                            st.markdown(
+                                f"<div style='font-size:0.78rem; font-weight:700;'>"
+                                f"{_sg['종목명'][:16]}</div>"
+                                f"<div style='font-size:0.72rem; color:rgba(255,255,255,0.5);'>"
+                                f"{_sg_acc} · {_sg['분배율']:.2f}%</div>",
+                                unsafe_allow_html=True,
+                            )
+                            st.metric("달성률", f"{_sg_ach:.0f}%",
+                                      delta=f"{_sg_net/10000:.0f}만원",
+                                      delta_color="normal" if _sg_ach >= 100 else "inverse")
 
         # 권장 분배율 적용 시 고갈 시점 간단 추정
         with st.expander("📊 권장 분배율 적용 시 고갈 예상", expanded=False):

@@ -757,19 +757,30 @@ def _render_watchlist_tab(
         else:
             st.caption("시트에 종목코드 컬럼을 추가하면 실시간 주가가 연동됩니다.")
 
-    st.dataframe(
+    _col_cfg = {
+        "목표가":       st.column_config.NumberColumn("목표가(원)",     format="%,.0f"),
+        "현재가":       st.column_config.NumberColumn("현재가(원)",     format="%,.0f"),
+        "전일대비(%)":  st.column_config.NumberColumn("전일대비(%)",   format="%+.2f%%"),
+        "전일대비(원)": st.column_config.NumberColumn("전일대비(원)",   format="%+,.0f"),
+        "수량":         st.column_config.NumberColumn("수량(주)",       format="%,.0f"),
+        "평가액":       st.column_config.NumberColumn("평가액(원)",     format="%,.0f"),
+        "월분배율(%)":  st.column_config.NumberColumn("분배율(%)",     format="%.2f%%"),
+        "세후분배금":   st.column_config.NumberColumn("세후분배금(원)", format="%,.0f"),
+    }
+    # 행 선택 활성화 → 종목명 클릭으로 상세 분석 연동
+    _sel_event = st.dataframe(
         _disp, hide_index=True, use_container_width=True,
-        column_config={
-            "목표가":       st.column_config.NumberColumn("목표가(원)",   format="%,.0f"),
-            "현재가":       st.column_config.NumberColumn("현재가(원)",   format="%,.0f"),
-            "전일대비(%)":  st.column_config.NumberColumn("전일대비(%)", format="%+.2f%%"),
-            "전일대비(원)": st.column_config.NumberColumn("전일대비(원)", format="%+,.0f"),
-            "수량":         st.column_config.NumberColumn("수량(주)",     format="%,.0f"),
-            "평가액":       st.column_config.NumberColumn("평가액(원)",   format="%,.0f"),
-            "월분배율(%)":  st.column_config.NumberColumn("분배율(%)",   format="%.2f%%"),
-            "세후분배금":   st.column_config.NumberColumn("세후분배금(원)", format="%,.0f"),
-        },
+        column_config=_col_cfg,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="wl_table_sel",
     )
+    # 선택된 행 → session_state에 종목명 저장
+    _sel_rows = _sel_event.selection.get("rows", []) if _sel_event else []
+    if _sel_rows:
+        _clicked_name = _disp.iloc[_sel_rows[0]]["종목명"]
+        st.session_state["wl_sel_stock"] = _clicked_name
+        st.caption(f"🔍 **{_clicked_name}** 선택됨 → 아래 종목 상세 분석에 반영")
 
     # 계좌별 월분배금 합계 요약
     acc_sum      = wl_df.groupby("계좌")["세후분배금"].sum()
@@ -786,55 +797,27 @@ def _render_watchlist_tab(
                         help="현재가 × 수량 합계 (수량 입력 종목만)")
 
     # ══════════════════════════════════════════════════
-    # 섹션 2: 시나리오 연계 분석
+    # 섹션 2: 종목 상세 분석 (순서 변경: 현황 바로 아래)
     # ══════════════════════════════════════════════════
     st.divider()
-    st.markdown("**② 시나리오 연계 — 편입 효과 분석**")
-    st.caption("관심종목을 현재 계좌에 편입하면 월 수령액이 어떻게 변하는지 계산합니다.")
+    st.markdown("**② 종목 상세 분석**")
+    st.caption("위 테이블에서 행을 클릭하거나 아래 드롭다운으로 종목을 선택하세요.")
 
-    sc2_cols = st.columns(3)
-    _acc_map = {"IRP": irp_total, "ISA": isa_total, "일반": general_total, "연금저축": ps_total}
-
-    for i, (_, row) in enumerate(wl_df.head(3).iterrows()):
-        acc_val = _acc_map.get(row.get("계좌","IRP"), irp_total)
-        _wl_monthly = float(row.get("월분배금", 0))
-        _tax_rate   = IRP_TAX_RATE if row.get("계좌") in ["IRP","연금저축"] else 0.099
-        _wl_net     = _wl_monthly * (1 - _tax_rate)
-        _total_est  = public_pension + _wl_net
-        _ach        = (_total_est / target_monthly * 100) if target_monthly > 0 else 0
-        _ach_color  = "#7dffb0" if _ach >= 100 else "#FFD700" if _ach >= 80 else "#FF4B4B"
-        with sc2_cols[i % 3]:
-            with st.container(border=True):
-                st.markdown(
-                    f"<div style='font-size:0.82rem; font-weight:700;'>"
-                    f"{str(row.get('종목명',''))[:16]}</div>"
-                    f"<div style='font-size:0.75rem; color:rgba(255,255,255,0.5);'>"
-                    f"{row.get('계좌','')} · {row.get('월분배율(%)',0):.2f}%</div>",
-                    unsafe_allow_html=True,
-                )
-                st.metric("월 세후 분배금", f"{_wl_net:,.0f}원")
-                st.metric(
-                    "연금+분배금 합계",
-                    f"{_total_est:,.0f}원",
-                    delta=f"달성률 {_ach:.0f}%",
-                    delta_color="normal" if _ach >= 100 else "inverse",
-                )
-                res_wl = _match_watchlist_research(str(row.get("종목명","")))
-                if res_wl:
-                    st.caption(f"적합계좌: {res_wl['적합계좌']} | 위험: {res_wl['위험등급']}")
-
-    # ══════════════════════════════════════════════════
-    # 섹션 3: 종목 상세 분석
-    # ══════════════════════════════════════════════════
-    st.divider()
-    st.markdown("**③ 종목 상세 분석**")
+    _stock_list = wl_df["종목명"].tolist()
+    _default_idx = 0
+    _saved = st.session_state.get("wl_sel_stock", "")
+    if _saved and _saved in _stock_list:
+        _default_idx = _stock_list.index(_saved)
 
     sel_stock = st.selectbox(
         "분석할 종목 선택",
-        wl_df["종목명"].tolist(),
-        key="wl_sel_stock",
+        _stock_list,
+        index=_default_idx,
+        key="wl_sel_stock_dd",
         label_visibility="collapsed",
     )
+    # 드롭다운 변경 시 session_state 동기화
+    st.session_state["wl_sel_stock"] = sel_stock
     sel_row = wl_df[wl_df["종목명"] == sel_stock].iloc[0]
     res_data = _match_watchlist_research(str(sel_stock))
 
@@ -1039,6 +1022,44 @@ def _render_watchlist_tab(
                     _m4.metric("저가", f"{hist_df['종가'].min():,.0f}원")
     else:
         st.caption("💡 시트에 종목코드를 입력하면 주가 추이 차트가 표시됩니다.")
+
+    # ══════════════════════════════════════════════════
+    # 섹션 3: 시나리오 연계 분석
+    # ══════════════════════════════════════════════════
+    st.divider()
+    st.markdown("**③ 시나리오 연계 — 편입 효과 분석**")
+    st.caption("관심종목을 현재 계좌에 편입하면 월 수령액이 어떻게 변하는지 계산합니다.")
+
+    sc2_cols = st.columns(3)
+    _acc_map = {"IRP": irp_total, "ISA": isa_total, "일반": general_total, "연금저축": ps_total}
+
+    for i, (_, row) in enumerate(wl_df.head(3).iterrows()):
+        acc_val = _acc_map.get(row.get("계좌","IRP"), irp_total)
+        _wl_monthly = float(row.get("월분배금", 0))
+        _tax_rate   = IRP_TAX_RATE if row.get("계좌") in ["IRP","연금저축"] else 0.099
+        _wl_net     = _wl_monthly * (1 - _tax_rate)
+        _total_est  = public_pension + _wl_net
+        _ach        = (_total_est / target_monthly * 100) if target_monthly > 0 else 0
+        _ach_color  = "#7dffb0" if _ach >= 100 else "#FFD700" if _ach >= 80 else "#FF4B4B"
+        with sc2_cols[i % 3]:
+            with st.container(border=True):
+                st.markdown(
+                    f"<div style='font-size:0.82rem; font-weight:700;'>"
+                    f"{str(row.get('종목명',''))[:16]}</div>"
+                    f"<div style='font-size:0.75rem; color:rgba(255,255,255,0.5);'>"
+                    f"{row.get('계좌','')} · {row.get('월분배율(%)',0):.2f}%</div>",
+                    unsafe_allow_html=True,
+                )
+                st.metric("월 세후 분배금", f"{_wl_net:,.0f}원")
+                st.metric(
+                    "연금+분배금 합계",
+                    f"{_total_est:,.0f}원",
+                    delta=f"달성률 {_ach:.0f}%",
+                    delta_color="normal" if _ach >= 100 else "inverse",
+                )
+                res_wl = _match_watchlist_research(str(row.get("종목명","")))
+                if res_wl:
+                    st.caption(f"적합계좌: {res_wl['적합계좌']} | 위험: {res_wl['위험등급']}")
 
     # ══════════════════════════════════════════════════
     # 섹션 4: 계좌별 교체 시뮬레이터

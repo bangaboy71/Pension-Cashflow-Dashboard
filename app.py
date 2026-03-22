@@ -391,33 +391,40 @@ actual_gid = "여기에_실적탭_gid"
 # ──────────────────────────────────────────────────────
 
 # ── 관심종목 실시간 주가 수집 ─────────────────────────
+def _normalize_code(code: str) -> str:
+    """종목코드를 Yahoo Finance 형식으로 정규화. 예: 498400 → 498400.KS"""
+    code = str(code).strip()
+    if not code or code in ("nan", "0"):
+        return ""
+    # 이미 .KS/.KQ 형식이면 그대로, 숫자만 있으면 .KS 추가
+    if "." not in code:
+        code = code + ".KS"
+    return code.upper()
+
+
 def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
     """
-    종목코드 → (현재가, 전일대비%, 등락) 반환.
-    네이버 금융 크롤링. 실패 시 (0, 0.0, 0.0).
+    종목코드 → (현재가, 전일대비%, 전일대비금액) 반환.
+    Yahoo Finance API 사용. 실패 시 (0, 0.0, 0.0).
     """
-    if not code or str(code).strip() == "":
+    ycode = _normalize_code(code)
+    if not ycode:
         return 0, 0.0, 0.0
     try:
         import requests as _req
-        from bs4 import BeautifulSoup as _BS
-        code = str(code).strip().replace(".KS","").replace(".KQ","")
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ycode}"
         res = _req.get(
-            f"https://finance.naver.com/item/main.naver?code={code}",
+            url,
             headers={"User-Agent": "Mozilla/5.0"},
-            timeout=4,
+            params={"interval": "1d", "range": "2d"},
+            timeout=5,
         )
-        soup = _BS(res.text, "html.parser")
-        now_p = int(
-            soup.find("div", {"class": "today"})
-                .find("span", {"class": "blind"}).text.replace(",", "")
-        )
-        prev_p = int(
-            soup.find("td", {"class": "first"})
-                .find("span", {"class": "blind"}).text.replace(",", "")
-        )
-        chg_pct = ((now_p - prev_p) / prev_p * 100) if prev_p > 0 else 0.0
+        data   = res.json()
+        meta   = data["chart"]["result"][0]["meta"]
+        now_p  = int(meta.get("regularMarketPrice", 0))
+        prev_p = int(meta.get("previousClose", now_p))
         chg_amt = now_p - prev_p
+        chg_pct = (chg_amt / prev_p * 100) if prev_p > 0 else 0.0
         return now_p, round(chg_pct, 2), chg_amt
     except Exception:
         return 0, 0.0, 0.0
@@ -445,98 +452,51 @@ def fetch_watchlist_prices(codes: tuple) -> dict:
 @st.cache_data(ttl="10m", show_spinner=False)
 def fetch_price_history(code: str, pages: int = 5) -> pd.DataFrame:
     """
-    네이버 금융 차트 API → 일별 종가 DataFrame 반환.
-    timeframe: day, count: 수집 거래일 수
-    pages 파라미터: 1=약20일, 5=약100일 (하위 호환)
+    Yahoo Finance API → 일별 OHLCV DataFrame 반환.
+    pages: 1=1개월, 5=3개월, 13=6개월 (하위 호환 매핑)
     """
-    if not code or str(code).strip() in ("", "nan", "0"):
+    ycode = _normalize_code(code)
+    if not ycode:
         return pd.DataFrame()
-    code  = str(code).strip().replace(".KS","").replace(".KQ","").replace(".ks","").replace(".kq","")
-    count = max(pages * 20, 20)   # pages→거래일 수 변환
+
+    # pages → 기간 매핑
+    range_map = {1: "1mo", 2: "1mo", 3: "3mo", 4: "3mo",
+                 5: "3mo", 6: "6mo", 13: "6mo"}
+    yrange = range_map.get(pages, "3mo")
+
     try:
-        import requests as _req, json as _json
-        # 방법 1: 네이버 금융 일봉 차트 API
-        url = (
-            f"https://api.finance.naver.com/siseJson.naver"
-            f"?symbol={code}&requestType=1&startTime=&endTime="
-            f"&timeframe=day&count={count}&requestType=0"
-        )
+        import requests as _req
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ycode}"
         res = _req.get(
             url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Referer":    "https://finance.naver.com",
-                "Accept":     "application/json, text/javascript, */*",
-            },
-            timeout=5,
+            headers={"User-Agent": "Mozilla/5.0"},
+            params={"interval": "1d", "range": yrange},
+            timeout=6,
         )
-        # 응답이 JS 배열 형식: [[날짜,시가,고가,저가,종가,거래량], ...]
-        raw = res.text.strip()
-        if not raw or raw == "null":
-            raise ValueError("빈 응답")
-        data = _json.loads(raw)
-        if not isinstance(data, list) or len(data) < 2:
-            raise ValueError("데이터 없음")
+        data   = res.json()
+        result = data["chart"]["result"][0]
+        times  = result["timestamp"]
+        ohlcv  = result["indicators"]["quote"][0]
 
         rows = []
-        for item in data:
-            if not isinstance(item, list) or len(item) < 6:
-                continue
+        for i, ts in enumerate(times):
             try:
                 rows.append({
-                    "날짜": str(item[0]),   # "20260321"
-                    "시가": int(item[1]),
-                    "고가": int(item[2]),
-                    "저가": int(item[3]),
-                    "종가": int(item[4]),
-                    "거래량": int(item[5]),
+                    "날짜":   pd.Timestamp(ts, unit="s", tz="Asia/Seoul").tz_localize(None),
+                    "시가":   int(ohlcv["open"][i]  or 0),
+                    "고가":   int(ohlcv["high"][i]  or 0),
+                    "저가":   int(ohlcv["low"][i]   or 0),
+                    "종가":   int(ohlcv["close"][i] or 0),
+                    "거래량": int(ohlcv["volume"][i] or 0),
                 })
             except Exception:
                 continue
 
-        if not rows:
-            raise ValueError("파싱 실패")
-
         df = pd.DataFrame(rows)
-        df["날짜"] = pd.to_datetime(df["날짜"], format="%Y%m%d", errors="coerce")
-        df = df.dropna(subset=["날짜"]).sort_values("날짜").reset_index(drop=True)
+        df = df[df["종가"] > 0].sort_values("날짜").reset_index(drop=True)
         return df
-
     except Exception:
-        # 방법 2: 네이버 금융 모바일 API 폴백
-        try:
-            import requests as _req
-            url2 = (
-                f"https://m.stock.naver.com/api/stock/{code}"
-                f"/price?startDateTime=&endDateTime=&timeframe=day&count={count}"
-            )
-            res2 = _req.get(
-                url2,
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=5,
-            )
-            data2 = res2.json()
-            items = data2.get("priceInfos", data2.get("stockPriceInfos", []))
-            rows2 = []
-            for item in items:
-                try:
-                    rows2.append({
-                        "날짜": str(item.get("localTradedAt", item.get("date",""))),
-                        "종가": int(str(item.get("closePrice", item.get("close",0))).replace(",","")),
-                        "고가": int(str(item.get("highPrice",  item.get("high", 0))).replace(",","")),
-                        "저가": int(str(item.get("lowPrice",   item.get("low",  0))).replace(",","")),
-                        "거래량": 0,
-                    })
-                except Exception:
-                    continue
-            if not rows2:
-                return pd.DataFrame()
-            df2 = pd.DataFrame(rows2)
-            df2["날짜"] = pd.to_datetime(df2["날짜"], errors="coerce")
-            df2 = df2.dropna(subset=["날짜"]).sort_values("날짜").reset_index(drop=True)
-            return df2
-        except Exception:
-            return pd.DataFrame()
+        return pd.DataFrame()
 
 # 관심종목 연금 특화 분석 데이터
 # ──────────────────────────────────────────────────────
@@ -589,9 +549,9 @@ def _render_watchlist_tab(
     price_map = {}
     if _has_code:
         _codes = tuple(
-            str(c).strip().replace(".KS","").replace(".KQ","")
+            _normalize_code(c)
             for c in wl_df["종목코드"].dropna()
-            if str(c).strip().replace(".KS","").replace(".KQ","") not in ("", "nan", "0")
+            if _normalize_code(str(c)) not in ("", "nan", "0")
         )
         if _codes:
             with st.spinner("실시간 주가 수집 중..."):
@@ -600,7 +560,7 @@ def _render_watchlist_tab(
     # 현재가·평가액 업데이트 (시트값 우선, 없으면 실시간 크롤링값 사용)
     if price_map and not wl_df.empty:
         def _apply_price(row):
-            code = str(row.get("종목코드","")).strip()                       .replace(".KS","").replace(".KQ","")
+            code = _normalize_code(str(row.get("종목코드","")))
             p    = price_map.get(code, (0, 0.0, 0.0))[0]
             # 시트에 현재가가 입력되어 있으면 우선 사용
             sheet_p = float(row.get("현재가", 0))
@@ -608,13 +568,13 @@ def _render_watchlist_tab(
         wl_df["현재가_실시간"] = wl_df.apply(_apply_price, axis=1)
         wl_df["전일대비(%)"]   = wl_df.apply(
             lambda r: price_map.get(
-                str(r.get("종목코드","")).strip().replace(".KS","").replace(".KQ",""),
+                _normalize_code(str(r.get("종목코드",""))),
                 (0,0.0,0.0))[1],
             axis=1
         )
         wl_df["전일대비(원)"]  = wl_df.apply(
             lambda r: price_map.get(
-                str(r.get("종목코드","")).strip().replace(".KS","").replace(".KQ",""),
+                _normalize_code(str(r.get("종목코드",""))),
                 (0,0.0,0.0))[2],
             axis=1
         )
@@ -882,7 +842,7 @@ def _render_watchlist_tab(
             )
 
     # ── 주가 추이 차트 ──────────────────────────────────
-    _sel_code = str(sel_row.get("종목코드", "")).strip().replace(".KS","").replace(".KQ","")
+    _sel_code = _normalize_code(str(sel_row.get("종목코드", "")))
     if _sel_code and _sel_code not in ("", "nan", "0"):
         with st.container(border=True):
             _chart_cols = st.columns([4, 1])

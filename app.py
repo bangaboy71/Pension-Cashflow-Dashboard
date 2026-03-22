@@ -769,7 +769,7 @@ def _render_watchlist_tab(
         "월분배율(%)":  st.column_config.NumberColumn("분배율(%)",     format="%.2f%%"),
         "세후분배금":   st.column_config.NumberColumn("세후분배금(원)", format="%,.0f"),
     }
-    # 행 선택 활성화 → 종목명 클릭으로 상세 분석 연동
+    # 행 선택 활성화 → 선택된 행 인덱스로 직접 종목 결정
     _sel_event = st.dataframe(
         _disp, hide_index=True, use_container_width=True,
         column_config=_col_cfg,
@@ -777,12 +777,18 @@ def _render_watchlist_tab(
         selection_mode="single-row",
         key="wl_table_sel",
     )
-    # 선택된 행 → session_state에 종목명 저장
-    _sel_rows = _sel_event.selection.get("rows", []) if _sel_event else []
+    # 선택된 행 인덱스 추출 → 종목명 즉시 결정
+    _sel_rows = (_sel_event.selection.get("rows", [])
+                 if hasattr(_sel_event, "selection") else [])
+    _stock_list = wl_df["종목명"].tolist()
+    if _sel_rows and _sel_rows[0] < len(_disp):
+        _tbl_selected = _disp.iloc[_sel_rows[0]]["종목명"]
+    else:
+        _tbl_selected = st.session_state.get("wl_tbl_stock", _stock_list[0] if _stock_list else "")
+    # 선택 유지용 저장
     if _sel_rows:
-        _clicked_name = _disp.iloc[_sel_rows[0]]["종목명"]
-        st.session_state["wl_sel_stock"] = _clicked_name
-        st.caption(f"🔍 **{_clicked_name}** 선택됨 → 아래 종목 상세 분석에 반영")
+        st.session_state["wl_tbl_stock"] = _tbl_selected
+        st.caption(f"🔍 **{_tbl_selected}** 선택됨")
 
     # 계좌별 월분배금 합계 요약
     acc_sum      = wl_df.groupby("계좌")["세후분배금"].sum()
@@ -799,28 +805,16 @@ def _render_watchlist_tab(
                         help="현재가 × 수량 합계 (수량 입력 종목만)")
 
     # ══════════════════════════════════════════════════
-    # 섹션 2: 종목 상세 분석 (순서 변경: 현황 바로 아래)
+    # 섹션 2: 종목 상세 분석
     # ══════════════════════════════════════════════════
     st.divider()
-    st.markdown("**② 종목 상세 분석**")
-    st.caption("위 테이블에서 행을 클릭하거나 아래 드롭다운으로 종목을 선택하세요.")
+    # 선택된 종목 표시 (테이블 행 체크 → 자동 반영)
+    sel_stock = _tbl_selected if _tbl_selected in _stock_list else (
+        _stock_list[0] if _stock_list else "")
+    st.markdown(f"**② 종목 상세 분석 — {sel_stock}**")
+    st.caption("위 테이블에서 행을 체크하면 자동으로 해당 종목 상세 정보가 표시됩니다.")
 
-    _stock_list = wl_df["종목명"].tolist()
-    _default_idx = 0
-    _saved = st.session_state.get("wl_sel_stock", "")
-    if _saved and _saved in _stock_list:
-        _default_idx = _stock_list.index(_saved)
-
-    sel_stock = st.selectbox(
-        "분석할 종목 선택",
-        _stock_list,
-        index=_default_idx,
-        key="wl_sel_stock_dd",
-        label_visibility="collapsed",
-    )
-    # 드롭다운 변경 시 session_state 동기화
-    st.session_state["wl_sel_stock"] = sel_stock
-    sel_row = wl_df[wl_df["종목명"] == sel_stock].iloc[0]
+    sel_row  = wl_df[wl_df["종목명"] == sel_stock].iloc[0]
     res_data = _match_watchlist_research(str(sel_stock))
 
     d1, d2 = st.columns(2)

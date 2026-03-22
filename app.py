@@ -2733,6 +2733,7 @@ with _main_tab1:
         _bar_세후 = [tax_result["공적연금_세후"], tax_result["IRP_세후"],
                      tax_result["ISA_세후"]] + ([_gen_net_bar] if general_total>0 else [])
         bar_df = pd.DataFrame({"구분":_bar_구분, "세전":_bar_세전, "세후":_bar_세후})
+        fig_bar = go.Figure()
         fig_bar.add_trace(go.Bar(
             name="세전", x=bar_df["구분"], y=bar_df["세전"],
             marker_color="rgba(135,206,235,0.4)",

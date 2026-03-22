@@ -1599,12 +1599,13 @@ def build_scenario_params(sc_df: pd.DataFrame, sc_name: str) -> dict:
     acc_map = {"IRP": "irp", "ISA": "isa", "일반": "gen"}
     for acc_kr, acc_en in acc_map.items():
         rows = sub[sub["계좌"] == acc_kr]
-        if rows.empty:
-            continue
+        rows = rows.copy()
+        rows["원금"] = pd.to_numeric(
+            rows["원금"].astype(str).str.replace(",",""), errors="coerce"
+        ).fillna(0)
         total = rows["원금"].sum()
-        if total <= 0:
+        if total < 0:
             continue
-        # 종목별 월분배금 계산 (수량×주당분배금 우선)
         def _monthly(r):
             qty  = float(r.get("수량",      0) or 0)
             dps  = float(r.get("주당분배금", 0) or 0)
@@ -2250,6 +2251,9 @@ with st.sidebar:
 # 직접 작성 모드 우선 적용, 그 다음 시트 시나리오
 _sc_mode_val = st.session_state.get("sc_mode", "📋 시트 시나리오 선택")
 _sc_applied  = False   # 시나리오 적용 여부 플래그
+_irp_names   = []      # IRP 구성 종목명
+_isa_names   = []      # ISA 구성 종목명
+_gen_names   = []      # 일반 구성 종목명
 
 if _sc_mode_val == "✏️ 앱에서 직접 작성":
     _cs = st.session_state.get("_custom_sc", {})
@@ -2260,13 +2264,20 @@ if _sc_mode_val == "✏️ 앱에서 직접 작성":
         if _cs.get("irp_rate", 0) > 0:  palantir_rate = _cs["irp_rate"]
         if _cs.get("isa_rate", 0) > 0:  kodex_rate    = _cs["isa_rate"]
         _sc_applied = True
+        _irp_names = []
+        _isa_names = []
+        _gen_names = []
 
 elif sc_choice != "기본 (시트 연금현황)" and not sc_df.empty:
     _sc = build_scenario_params(sc_df, sc_choice)
     # 원금 교체
-    if _sc["irp_total"]  > 0: irp_total     = _sc["irp_total"]
-    if _sc["isa_total"]  > 0: isa_total     = _sc["isa_total"]
-    if _sc["gen_total"]  > 0: general_total = _sc["gen_total"]
+    if _sc["irp_total"]  > 0: irp_total = _sc["irp_total"]
+    if _sc["isa_total"]  > 0: isa_total = _sc["isa_total"]
+    _gen_sc_exists = not sc_df[
+        (sc_df["시나리오명"] == sc_choice) & (sc_df["계좌"] == "일반")
+    ].empty
+    if _gen_sc_exists and _sc["gen_total"] > 0:
+        general_total = _sc["gen_total"]
     # 분배율 교체 — 모든 입력 모드에서 적용
     # (시나리오 분배율로 분배금 재계산 → 실제 대시보드 수치 변화)
     if _sc["irp_rate"] > 0:
@@ -2276,6 +2287,21 @@ elif sc_choice != "기본 (시트 연금현황)" and not sc_df.empty:
         kodex_rate     = _sc["isa_rate"]
         isa_income_input = int(isa_total * kodex_rate)
     _sc_applied = True
+    # 종목명 추출 — _sc 딕셔너리 우선, 없으면 sc_df 직접 파싱
+    def _extract_names(acc_kr):
+        # 방법 1: build_scenario_params 반환값에서
+        key = {"IRP":"irp","ISA":"isa","일반":"gen"}.get(acc_kr,"")
+        names = [r.get("종목명","") for r in _sc.get(f"{key}_종목",[]) if r.get("종목명","")]
+        if names:
+            return names
+        # 방법 2: sc_df 직접 필터링
+        if not sc_df.empty and "종목명" in sc_df.columns:
+            sub = sc_df[(sc_df["시나리오명"]==sc_choice) & (sc_df["계좌"]==acc_kr)]
+            return [str(n) for n in sub["종목명"].dropna().tolist() if str(n).strip()]
+        return []
+    _irp_names = _extract_names("IRP")
+    _isa_names = _extract_names("ISA")
+    _gen_names = _extract_names("일반")
 
 # 이번 달 분배금 확정
 # 시나리오 적용 시: 시나리오 분배율 기반 계산값 사용
@@ -2614,8 +2640,8 @@ with _main_tab1:
 
         # IRP 카드
         with st.container(border=True):
-            st.markdown("**💼 IRP (팔란티어 커버드콜)**")
-            da, db = st.columns(2)
+            _irp_lbl = '  ·  '.join(n[:14] for n in _irp_names[:2]) if _irp_names else '팔란티어 커버드콜'
+            st.markdown(f"**💼 IRP ({_irp_lbl})**")
             da.metric("세전", f"{tax_result['IRP_세전']:,.0f}원")
             db.metric("연금소득세 5.5%", f"-{tax_result['IRP_세금']:,.0f}원",
                       delta_color="inverse")
@@ -2642,8 +2668,8 @@ with _main_tab1:
 
         # ISA 카드
         with st.container(border=True):
-            st.markdown("**📦 ISA (KODEX 위클리커버드콜)**")
-            ea, eb = st.columns(2)
+            _isa_lbl = '  ·  '.join(n[:14] for n in _isa_names[:2]) if _isa_names else 'KODEX 위클리커버드콜'
+            st.markdown(f"**📦 ISA ({_isa_lbl})**")
             ea.metric("세전", f"{tax_result['ISA_세전']:,.0f}원")
             eb.metric("분리과세 9.9%", f"-{tax_result['ISA_세금']:,.0f}원",
                       delta_color="inverse",
@@ -2653,6 +2679,25 @@ with _main_tab1:
                 f"실수령 {tax_result['ISA_세후']:,.0f}원</div>",
                 unsafe_allow_html=True
             )
+
+        # 일반 계좌 카드 (잔액 있을 때만)
+        if general_total > 0:
+            _gen_rate_now = float(st.session_state.get("general_rate_hm", 0.001))
+            _gen_inc  = general_total * _gen_rate_now
+            _gen_tax  = _gen_inc * 0.154
+            _gen_net  = _gen_inc - _gen_tax
+            with st.container(border=True):
+                _gen_lbl = "  ·  ".join(n[:14] for n in _gen_names[:2]) if _gen_names else "일반계좌"
+                st.markdown(f"**💵 일반 ({_gen_lbl})**")
+                ga, gb = st.columns(2)
+                ga.metric("세전", f"{_gen_inc:,.0f}원")
+                gb.metric("배당소득세 15.4%", f"-{_gen_tax:,.0f}원", delta_color="inverse")
+                st.markdown(
+                    f"<div style='text-align:right; font-size:1.1rem; "
+                    f"font-weight:700; color:#7dffb0;'>"
+                    f"실수령 {_gen_net:,.0f}원</div>",
+                    unsafe_allow_html=True
+                )
 
         # 합계
         with st.container(border=True):
@@ -2677,12 +2722,15 @@ with _main_tab1:
         st.markdown("#### 📊 세전 vs 세후 비교")
 
         # 세전·세후 비교 막대차트
-        bar_df = pd.DataFrame({
-            "구분":   ["공적연금", "IRP", "ISA"],
-            "세전":   [tax_result["공적연금_세전"], tax_result["IRP_세전"], tax_result["ISA_세전"]],
-            "세후":   [tax_result["공적연금_세후"], tax_result["IRP_세후"], tax_result["ISA_세후"]],
-        })
-        fig_bar = go.Figure()
+        _gen_rate_bar = float(st.session_state.get("general_rate_hm", 0.001))
+        _gen_inc_bar  = general_total * _gen_rate_bar
+        _gen_net_bar  = _gen_inc_bar * (1 - 0.154)
+        _bar_구분 = ["공적연금","IRP"] + (["ISA"]) + (["일반"] if general_total>0 else [])
+        _bar_세전 = [tax_result["공적연금_세전"], tax_result["IRP_세전"],
+                     tax_result["ISA_세전"]] + ([_gen_inc_bar] if general_total>0 else [])
+        _bar_세후 = [tax_result["공적연금_세후"], tax_result["IRP_세후"],
+                     tax_result["ISA_세후"]] + ([_gen_net_bar] if general_total>0 else [])
+        bar_df = pd.DataFrame({"구분":_bar_구분, "세전":_bar_세전, "세후":_bar_세후})
         fig_bar.add_trace(go.Bar(
             name="세전", x=bar_df["구분"], y=bar_df["세전"],
             marker_color="rgba(135,206,235,0.4)",
@@ -2691,7 +2739,7 @@ with _main_tab1:
         ))
         fig_bar.add_trace(go.Bar(
             name="세후", x=bar_df["구분"], y=bar_df["세후"],
-            marker_color=["#87CEEB", "#FFD700", "#FF4B4B"],
+            marker_color=(["#87CEEB","#FFD700","#FF4B4B","#AFA9EC"] if general_total>0 else ["#87CEEB","#FFD700","#FF4B4B"]),
             text=[f"{v/10000:.0f}만" for v in bar_df["세후"]],
             textposition="outside",
         ))
@@ -2708,18 +2756,15 @@ with _main_tab1:
 
         # 월 수입 구성 파이차트 (세후 기준)
         pie_df = pd.DataFrame({
-            "구분": ["공적연금", "IRP 수익", "ISA 수익"],
-            "금액": [
-                tax_result["공적연금_세후"],
-                tax_result["IRP_세후"],
-                tax_result["ISA_세후"],
-            ],
+            "구분": ["공적연금","IRP 수익","ISA 수익"] + (["일반"] if general_total>0 else []),
+            "금액": [tax_result["공적연금_세후"], tax_result["IRP_세후"],
+                     tax_result["ISA_세후"]] + ([_gen_net_bar] if general_total>0 else []),
         })
         fig_pie = px.pie(
             pie_df, values="금액", names="구분",
             hole=0.4,
             title="세후 월 수입 구성",
-            color_discrete_sequence=["#87CEEB", "#FFD700", "#FF4B4B"],
+            color_discrete_sequence=(["#87CEEB","#FFD700","#FF4B4B","#AFA9EC"] if general_total>0 else ["#87CEEB","#FFD700","#FF4B4B"]),
         )
         fig_pie.update_layout(
             paper_bgcolor="rgba(0,0,0,0)",

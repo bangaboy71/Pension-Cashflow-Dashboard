@@ -13,17 +13,19 @@ import plotly.graph_objects as go
 SHEET_URL      = "https://docs.google.com/spreadsheets/d/14e_0SQaBFbyEC-16hEEqvrJfdVXob20b3MLJ2Cn60Do"
 WORKSHEET_NAME = "연금현황"
 DATA_TTL            = "5m"
-REQUIRED_ITEMS      = ["공적연금", "IRP", "ISA", "목표생활비"]
+REQUIRED_ITEMS      = ["공적연금", "IRP", "ISA", "목표생활비"]  # 연금저축은 선택(없으면 0)
 SCENARIO_SHEET_GID  = "961920932"   # ← 시나리오 탭 gid(숫자) 입력. 탭이 없으면 직접 작성 모드만 활성화
 HOUSEHOLD_SHEET_GID = "122998571"   # ← 가계부 탭 gid(숫자) 입력
+
 # ── 세금 상수 ─────────────────────────────────────────
 # 건강보험료: 지역가입자 기준 (건보 6.99% + 장기요양 0.9182% ≈ 7.09%)
 # 단, 공무원연금 수령자는 연금소득의 50%를 소득월액 기준으로 산정
 HEALTH_INS_RATE        = 0.0709
 # ISA 비과세 한도: 연 200만원 → 월 환산
 ISA_TAX_FREE_MONTHLY   = 2_000_000 / 12
-# IRP·퇴직연금 분리과세: 5.5%
+# IRP·퇴직연금·연금저축 분리과세: 5.5% (소득세법 §129 ①5호)
 IRP_TAX_RATE           = 0.055
+PS_TAX_RATE            = 0.055   # 연금저축 (pension saving)
 
 
 
@@ -498,6 +500,7 @@ def calc_after_tax(
     public_pension: float,
     irp_income: float,
     isa_income: float,
+    ps_income: float = 0.0,   # 연금저축 (pension saving)
 ) -> dict:
     """
     세목별 공제 후 실수령액 계산 (소득세법 정확 적용).
@@ -509,6 +512,9 @@ def calc_after_tax(
 
     IRP / 퇴직연금
     ─ 연금소득세 분리과세 5.5% (지방세 포함) 적용
+
+    연금저축
+    ─ 연금소득세 분리과세 5.5% (IRP와 동일, 소득세법 §129 ①5호)
 
     ISA (KODEX 월배당)
     ─ 연 200만원 비과세 한도 내: 세금 0
@@ -534,14 +540,18 @@ def calc_after_tax(
     irp_tax = irp_income * IRP_TAX_RATE
     irp_net = irp_income - irp_tax
 
+    # ── 연금저축 ──
+    ps_tax  = ps_income * PS_TAX_RATE
+    ps_net  = ps_income - ps_tax
+
     # ── ISA ──
     isa_taxable = max(0, isa_income - ISA_TAX_FREE_MONTHLY)
     isa_tax     = isa_taxable * 0.099   # 9.9% 분리과세
     isa_net     = isa_income - isa_tax
 
-    total_gross = public_pension + irp_income + isa_income
-    total_tax   = pub_tax + pub_health + irp_tax + isa_tax
-    total_net   = pub_net + irp_net + isa_net
+    total_gross = public_pension + irp_income + ps_income + isa_income
+    total_tax   = pub_tax + pub_health + irp_tax + ps_tax + isa_tax
+    total_net   = pub_net + irp_net + ps_net + isa_net
 
     return {
         "공적연금_세전":   public_pension,
@@ -551,6 +561,9 @@ def calc_after_tax(
         "IRP_세전":        irp_income,
         "IRP_세금":        irp_tax,
         "IRP_세후":        irp_net,
+        "연금저축_세전":   ps_income,
+        "연금저축_세금":   ps_tax,
+        "연금저축_세후":   ps_net,
         "ISA_세전":        isa_income,
         "ISA_세금":        isa_tax,
         "ISA_세후":        isa_net,
@@ -850,8 +863,13 @@ def extract_values(df: pd.DataFrame) -> dict:
         "irp_shares":       safe_get(df, "IRP수량",  default=0.0),
         "isa_shares":       safe_get(df, "ISA수량",  default=0.0),
         # 주당 기본 분배금 (시트에 있으면 초기값으로 사용)
-        "irp_dps_default":  safe_get(df, "IRP주당분배금", default=0.0),
-        "isa_dps_default":  safe_get(df, "ISA주당분배금", default=0.0),
+        "irp_dps_default":  safe_get(df, "IRP주당분배금",    default=0.0),
+        "isa_dps_default":  safe_get(df, "ISA주당분배금",    default=0.0),
+        # 연금저축
+        "ps_total":         safe_get(df, "연금저축",         default=0.0),
+        "default_ps":       safe_get(df, "연금저축기본분배율", default=1.0),
+        "ps_shares":        safe_get(df, "연금저축수량",      default=0.0),
+        "ps_dps_default":   safe_get(df, "연금저축주당분배금", default=0.0),
     }
 
 
@@ -906,6 +924,10 @@ with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as
     isa_shares       = _vals["isa_shares"]
     irp_dps_default  = _vals["irp_dps_default"]
     isa_dps_default  = _vals["isa_dps_default"]
+    ps_total         = _vals["ps_total"]
+    default_ps       = _vals["default_ps"]
+    ps_shares        = _vals["ps_shares"]
+    ps_dps_default   = _vals["ps_dps_default"]
 
     # STEP 5 — 시나리오 탭 로드 (실패해도 앱 중단 없음)
     st.write("🎯 시나리오 데이터 로드 중...")
@@ -1012,7 +1034,29 @@ with st.sidebar:
         irp_income_input = irp_dps * _irp_shares_val
         isa_income_input = isa_dps * _isa_shares_val
 
+        # 연금저축 입력 (시트에 연금저축 잔액이 있을 때만)
+        if ps_total > 0:
+            if ps_shares > 0:
+                _ps_shares_val = int(ps_shares)
+                st.caption(f"연금저축 보유 수량: {_ps_shares_val:,}주 (시트 자동)")
+            else:
+                _ps_shares_val = st.number_input(
+                    "🏦 연금저축 보유 수량 (주)", min_value=0, value=1000,
+                    step=100, key="ps_shares_input",
+                )
+            _ps_dps_init = int(ps_dps_default) if ps_dps_default > 0                 else (int(_ps_default_amt / _ps_shares_val) if _ps_shares_val > 0 else 100)
+            ps_dps = st.number_input(
+                "🏦 연금저축 주당 분배금 (원)",
+                min_value=0, max_value=10_000,
+                value=_ps_dps_init, step=1, key="ps_dps",
+            )
+            ps_income_input = ps_dps * _ps_shares_val
+        else:
+            ps_income_input = 0
+
         # 결과 표시
+        _ps_line = (f"<br>연금저축 {ps_dps:,}원 × {_ps_shares_val:,}주 = "
+                    f"<b>{ps_income_input:,.0f}원</b>") if ps_total > 0 else ""
         st.markdown(
             f"<div style='background:rgba(255,215,0,0.08); padding:8px 10px; "
             f"border-radius:8px; border-left:3px solid #FFD700; font-size:0.82rem; "
@@ -1021,14 +1065,18 @@ with st.sidebar:
             f"<b>{irp_income_input:,.0f}원</b><br>"
             f"ISA {isa_dps:,}원 × {_isa_shares_val:,}주 = "
             f"<b>{isa_income_input:,.0f}원</b>"
+            + _ps_line +
             f"</div>",
             unsafe_allow_html=True,
         )
 
-        # 분배율 역산 → 시뮬레이션 연동
+        # 분배율 역산
         palantir_rate = irp_income_input / irp_total if irp_total > 0 else default_palantir / 100
         kodex_rate    = isa_income_input / isa_total  if isa_total  > 0 else default_kodex    / 100
-        st.caption(f"↳ IRP {palantir_rate*100:.2f}% / ISA {kodex_rate*100:.2f}% (시뮬레이션 반영)")
+        ps_rate       = ps_income_input  / ps_total   if ps_total   > 0 else default_ps       / 100
+        st.caption(f"↳ IRP {palantir_rate*100:.2f}% / ISA {kodex_rate*100:.2f}%"
+                   + (f" / 연금저축 {ps_rate*100:.2f}%" if ps_total > 0 else "")
+                   + " (시뮬레이션 반영)")
 
     elif _input_mode == "💵 월 총 분배금(원)":
         # ── 모드 B: 월 총 분배금(원) 직접 입력 ──────────────
@@ -1037,21 +1085,26 @@ with st.sidebar:
             "💼 IRP 월 총 분배금 (원)",
             min_value=0, max_value=int(irp_total * 0.10),
             value=_irp_default_amt, step=10_000, key="irp_amt",
-            help=f"시트 기준 추정: {_irp_default_amt:,.0f}원",
         )
         isa_income_input = st.number_input(
             "📦 ISA 월 총 분배금 (원)",
             min_value=0, max_value=int(isa_total * 0.10),
             value=_isa_default_amt, step=10_000, key="isa_amt",
-            help=f"시트 기준 추정: {_isa_default_amt:,.0f}원",
         )
+        ps_income_input = st.number_input(
+            "🏦 연금저축 월 총 분배금 (원)",
+            min_value=0, max_value=int(ps_total * 0.10) if ps_total > 0 else 10_000_000,
+            value=_ps_default_amt, step=10_000, key="ps_amt",
+        ) if ps_total > 0 else 0
         palantir_rate = irp_income_input / irp_total if irp_total > 0 else default_palantir / 100
         kodex_rate    = isa_income_input / isa_total  if isa_total  > 0 else default_kodex    / 100
+        ps_rate       = ps_income_input  / ps_total   if ps_total   > 0 else default_ps       / 100
         _irp_diff = irp_income_input - _irp_default_amt
         _isa_diff = isa_income_input - _isa_default_amt
         st.caption(
             f"IRP {palantir_rate*100:.2f}% / ISA {kodex_rate*100:.2f}%"
-            + (f"  |  기준 대비 IRP {_irp_diff:+,.0f} / ISA {_isa_diff:+,.0f}원"
+            + (f" / 연금저축 {ps_rate*100:.2f}%" if ps_total > 0 else "")
+            + (f"  |  기준대비 IRP {_irp_diff:+,.0f} / ISA {_isa_diff:+,.0f}원"
                if abs(_irp_diff)+abs(_isa_diff) > 0 else "")
         )
 
@@ -1068,13 +1121,18 @@ with st.sidebar:
             min_value=0.3, max_value=2.0,
             value=float(default_kodex), step=0.1, key="isa_rate",
         ) / 100
+        ps_rate = (st.slider(
+            "🏦 연금저축 월 분배율 (%)",
+            min_value=0.0, max_value=3.0,
+            value=float(default_ps), step=0.1, key="ps_rate_slider",
+        ) / 100) if ps_total > 0 else default_ps / 100
         irp_income_input = int(irp_total * palantir_rate)
         isa_income_input = int(isa_total  * kodex_rate)
+        ps_income_input  = int(ps_total   * ps_rate)
         st.caption(
             f"↳ IRP {irp_income_input:,.0f}원 / ISA {isa_income_input:,.0f}원"
+            + (f" / 연금저축 {ps_income_input:,.0f}원" if ps_total > 0 else "")
         )
-
-    # ── 목표 생활비 조정 ──────────────────────────────────
     st.divider()
     st.subheader("🎯 목표 생활비 조정")
     _tgt_base = float(target_monthly)
@@ -1326,10 +1384,11 @@ elif sc_choice != "기본 (시트 연금현황)" and sc_names:
 # 이번 달 분배금: 사이드바 직접 입력값 사용
 irp_income   = float(irp_income_input)
 isa_income   = float(isa_income_input)
-total_income = public_pension + irp_income + isa_income
+ps_income    = float(ps_income_input) if ps_total > 0 else 0.0
+total_income = public_pension + irp_income + ps_income + isa_income
 
 # 세후 계산
-tax_result = calc_after_tax(public_pension, irp_income, isa_income)
+tax_result = calc_after_tax(public_pension, irp_income, isa_income, ps_income)
 if not use_health_ins:
     tax_result["공적연금_세후"]  += tax_result["공적연금_건보료"]
     tax_result["총_세후"]        += tax_result["공적연금_건보료"]
@@ -1656,6 +1715,21 @@ with _main_tab1:
                 f"실수령 {tax_result['IRP_세후']:,.0f}원</div>",
                 unsafe_allow_html=True
             )
+
+        # 연금저축 카드 (잔액이 있을 때만 표시)
+        if ps_total > 0:
+            with st.container(border=True):
+                st.markdown("**🏦 연금저축**")
+                pa, pb = st.columns(2)
+                pa.metric("세전", f"{tax_result['연금저축_세전']:,.0f}원")
+                pb.metric("연금소득세 5.5%", f"-{tax_result['연금저축_세금']:,.0f}원",
+                          delta_color="inverse")
+                st.markdown(
+                    f"<div style='text-align:right; font-size:1.1rem; font-weight:700; color:#7dffb0;'>"
+                    f"실수령 {tax_result['연금저축_세후']:,.0f}원</div>",
+                    unsafe_allow_html=True
+                )
+
 
         # ISA 카드
         with st.container(border=True):

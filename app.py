@@ -451,7 +451,7 @@ def fetch_price_history(code: str, pages: int = 5) -> pd.DataFrame:
     """
     if not code or str(code).strip() in ("", "nan", "0"):
         return pd.DataFrame()
-    code  = str(code).strip()
+    code  = str(code).strip().replace(".KS","").replace(".KQ","").replace(".ks","").replace(".kq","")
     count = max(pages * 20, 20)   # pages→거래일 수 변환
     try:
         import requests as _req, json as _json
@@ -589,8 +589,9 @@ def _render_watchlist_tab(
     price_map = {}
     if _has_code:
         _codes = tuple(
-            str(c).strip() for c in wl_df["종목코드"].dropna()
-            if str(c).strip() not in ("", "nan", "0")
+            str(c).strip().replace(".KS","").replace(".KQ","")
+            for c in wl_df["종목코드"].dropna()
+            if str(c).strip().replace(".KS","").replace(".KQ","") not in ("", "nan", "0")
         )
         if _codes:
             with st.spinner("실시간 주가 수집 중..."):
@@ -599,18 +600,22 @@ def _render_watchlist_tab(
     # 현재가·평가액 업데이트 (시트값 우선, 없으면 실시간 크롤링값 사용)
     if price_map and not wl_df.empty:
         def _apply_price(row):
-            code = str(row.get("종목코드","")).strip()
+            code = str(row.get("종목코드","")).strip()                       .replace(".KS","").replace(".KQ","")
             p    = price_map.get(code, (0, 0.0, 0.0))[0]
             # 시트에 현재가가 입력되어 있으면 우선 사용
             sheet_p = float(row.get("현재가", 0))
             return sheet_p if sheet_p > 0 else p
         wl_df["현재가_실시간"] = wl_df.apply(_apply_price, axis=1)
         wl_df["전일대비(%)"]   = wl_df.apply(
-            lambda r: price_map.get(str(r.get("종목코드","")).strip(), (0,0.0,0.0))[1],
+            lambda r: price_map.get(
+                str(r.get("종목코드","")).strip().replace(".KS","").replace(".KQ",""),
+                (0,0.0,0.0))[1],
             axis=1
         )
         wl_df["전일대비(원)"]  = wl_df.apply(
-            lambda r: price_map.get(str(r.get("종목코드","")).strip(), (0,0.0,0.0))[2],
+            lambda r: price_map.get(
+                str(r.get("종목코드","")).strip().replace(".KS","").replace(".KQ",""),
+                (0,0.0,0.0))[2],
             axis=1
         )
         # 평가액 = 현재가 × 수량
@@ -835,8 +840,18 @@ def _render_watchlist_tab(
             _sel_total  = _acc_map.get(_sel_acc, irp_total)
             _sel_rate   = float(sel_row.get("월분배율(%)", 0)) / 100
             _sel_tax_r  = IRP_TAX_RATE if _sel_acc in ["IRP","연금저축"] else 0.099
-            # 원금 기반 계산 우선, 없으면 월분배금 직접 사용
-            _sel_gross  = _sel_total * _sel_rate if _sel_total > 0 and _sel_rate > 0                           else float(sel_row.get("월분배금", 0))
+            # 계산 우선순위:
+            # 1. 수량×주당분배금 (가장 정확)
+            # 2. 계좌 잔액×분배율
+            # 3. 시트 월분배금 직접 사용
+            _sel_qty    = float(sel_row.get("수량", 0))
+            _sel_dps    = float(sel_row.get("주당분배금", 0))
+            if _sel_qty > 0 and _sel_dps > 0:
+                _sel_gross = _sel_qty * _sel_dps
+            elif _sel_total > 0 and _sel_rate > 0:
+                _sel_gross = _sel_total * _sel_rate
+            else:
+                _sel_gross = float(sel_row.get("월분배금", 0))
             _sel_net    = _sel_gross * (1 - _sel_tax_r)
             _total_sim  = public_pension + _sel_net
             _ach_sim    = (_total_sim / target_monthly * 100) if target_monthly > 0 else 0
@@ -867,7 +882,7 @@ def _render_watchlist_tab(
             )
 
     # ── 주가 추이 차트 ──────────────────────────────────
-    _sel_code = str(sel_row.get("종목코드", "")).strip()
+    _sel_code = str(sel_row.get("종목코드", "")).strip().replace(".KS","").replace(".KQ","")
     if _sel_code and _sel_code not in ("", "nan", "0"):
         with st.container(border=True):
             _chart_cols = st.columns([4, 1])

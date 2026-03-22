@@ -14,8 +14,8 @@ SHEET_URL      = "https://docs.google.com/spreadsheets/d/14e_0SQaBFbyEC-16hEEqvr
 WORKSHEET_NAME = "연금현황"
 DATA_TTL            = "5m"
 REQUIRED_ITEMS      = ["공적연금", "IRP", "ISA", "목표생활비"]
-SCENARIO_SHEET_GID  = "961920932"   # ← 시나리오 탭 gid(숫자) 입력. 탭이 없으면 직접 작성 모드만 활성화
-HOUSEHOLD_SHEET_GID = "122998571"   # ← 가계부 탭 gid(숫자) 입력
+SCENARIO_SHEET_GID  = ""   # ← 시나리오 탭 gid(숫자) 입력. 탭이 없으면 직접 작성 모드만 활성화
+HOUSEHOLD_SHEET_GID = ""   # ← 가계부 탭 gid(숫자) 입력
 
 # ── 세금 상수 ─────────────────────────────────────────
 # 건강보험료: 지역가입자 기준 (건보 6.99% + 장기요양 0.9182% ≈ 7.09%)
@@ -254,6 +254,136 @@ def _render_household_tab(
                         (["비고"] if "비고" in month_df.columns else [])].copy()
         disp["금액"] = disp["금액"].apply(lambda x: f"{x:,.0f}")
         st.dataframe(disp, hide_index=True, use_container_width=True)
+
+    # ── 실지급 실적 연동 ─────────────────────────────────
+    st.divider()
+    _render_actual_section(url=_SHEET_URL_REF, target_monthly=target_monthly)
+
+
+# 실적 탭 URL 참조용 (함수 내부에서 SHEET_URL 접근)
+_SHEET_URL_REF = SHEET_URL
+
+
+def _render_actual_section(url: str, target_monthly: float):
+    """실지급 & 생활비 실적 관리 섹션 (가계부 탭 하단에 표시)"""
+    st.markdown("#### 📋 실지급 & 생활비 실적 관리")
+    st.caption(
+        "구글 시트 **실적** 탭(연월|공무원연금|IRP분배금|ISA분배금|일반분배금|생활비|비고) "
+        "데이터를 입력하면 자동 반영됩니다."
+    )
+
+    ACTUAL_SHEET_GID = st.secrets.get("actual_gid", "")
+
+    @st.cache_data(ttl=DATA_TTL, show_spinner=False)
+    def _load_actual(u: str, gid: str) -> pd.DataFrame:
+        if not gid:
+            return pd.DataFrame()
+        try:
+            import re as _re
+            sid = _re.search(r"/d/([a-zA-Z0-9_-]+)", u).group(1)
+            df  = pd.read_csv(
+                f"https://docs.google.com/spreadsheets/d/{sid}"
+                f"/export?format=csv&gid={gid}"
+            )
+            return df
+        except Exception:
+            return pd.DataFrame()
+
+    actual_df = _load_actual(url, ACTUAL_SHEET_GID)
+
+    if actual_df.empty:
+        with st.expander("📋 실적 시트 설정 방법", expanded=False):
+            st.markdown("""
+**구글 시트에 `실적` 탭을 추가하고 아래 헤더로 구성하세요.**
+
+| 연월 | 공무원연금 | IRP분배금 | ISA분배금 | 일반분배금 | 생활비 | 비고 |
+|---|---|---|---|---|---|---|
+| 2026-03 | 3624210 | 3827200 | 556200 | 0 | 3250000 | |
+
+**설정 순서**
+1. 구글 시트에서 `실적` 탭 생성 후 위 형식으로 입력
+2. 탭 우클릭 → 시트 ID(gid=XXXXXX) 확인
+3. Streamlit Cloud → Manage app → Settings → Secrets 에 추가:
+```
+actual_gid = "여기에_실적탭_gid"
+```
+""")
+        return
+
+    required_cols = ["연월", "공무원연금", "IRP분배금", "ISA분배금", "생활비"]
+    if any(col not in actual_df.columns for col in required_cols):
+        st.warning("실적 시트 컬럼을 확인하세요: 연월|공무원연금|IRP분배금|ISA분배금|생활비")
+        return
+
+    for col in ["공무원연금","IRP분배금","ISA분배금","일반분배금","생활비"]:
+        if col in actual_df.columns:
+            actual_df[col] = pd.to_numeric(
+                actual_df[col].astype(str).str.replace(",",""), errors="coerce"
+            ).fillna(0)
+
+    actual_df["총수입"] = (
+        actual_df["공무원연금"] + actual_df["IRP분배금"]
+        + actual_df["ISA분배금"]
+        + actual_df.get("일반분배금", pd.Series([0]*len(actual_df)))
+    )
+    actual_df["잉여/부족"] = actual_df["총수입"] - actual_df["생활비"]
+
+    # 최근 3개월 카드
+    recent = actual_df.tail(3)
+    r_cols = st.columns(len(recent))
+    for i, (_, row) in enumerate(recent.iterrows()):
+        gc = "#7dffb0" if row["잉여/부족"] >= 0 else "#FF4B4B"
+        with r_cols[i]:
+            with st.container(border=True):
+                st.markdown(
+                    f"<div style='font-size:0.82rem; font-weight:700; "
+                    f"color:rgba(255,255,255,0.6);'>{row['연월']}</div>",
+                    unsafe_allow_html=True,
+                )
+                st.metric("총 수입",  f"{row['총수입']:,.0f}원")
+                st.metric("생활비",   f"{row['생활비']:,.0f}원")
+                st.metric("잉여/부족", f"{row['잉여/부족']:+,.0f}원",
+                          delta_color="normal" if row["잉여/부족"] >= 0 else "inverse")
+
+    # 예측 vs 실적 차트
+    fig_act = go.Figure()
+    fig_act.add_trace(go.Bar(
+        x=actual_df["연월"], y=actual_df["총수입"]/10000,
+        name="실제 수입", marker_color="#87CEEB",
+        text=[f"{v/10000:.0f}만" for v in actual_df["총수입"]],
+        textposition="outside",
+    ))
+    fig_act.add_trace(go.Bar(
+        x=actual_df["연월"], y=actual_df["생활비"]/10000,
+        name="실제 생활비", marker_color="rgba(255,75,75,0.6)",
+        text=[f"{v/10000:.0f}만" for v in actual_df["생활비"]],
+        textposition="outside",
+    ))
+    fig_act.add_hline(
+        y=target_monthly/10000, line_dash="dot",
+        line_color="#FFD700", line_width=1.5,
+        annotation_text=f"목표 {target_monthly/10000:.0f}만원",
+        annotation_font_color="#FFD700",
+    )
+    fig_act.update_layout(
+        barmode="group", height=280,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(255,255,255,0.02)",
+        font_color="white",
+        legend=dict(orientation="h", y=-0.25, xanchor="center", x=0.5),
+        margin=dict(t=20, b=70, l=10, r=10),
+        yaxis=dict(title="만원", tickformat=","),
+        xaxis=dict(tickangle=-30), hovermode="x unified",
+    )
+    st.plotly_chart(fig_act, use_container_width=True)
+
+    # 누적 성과 요약
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("총 수입 누계",   f"{actual_df['총수입'].sum():,.0f}원")
+    s2.metric("총 생활비 누계", f"{actual_df['생활비'].sum():,.0f}원")
+    s3.metric("누적 잉여/부족", f"{actual_df['잉여/부족'].sum():+,.0f}원",
+              delta_color="normal" if actual_df["잉여/부족"].sum() >= 0 else "inverse")
+    s4.metric("월 평균 수입",   f"{actual_df['총수입'].mean():,.0f}원")
 
 def calc_target_expense(
     age: int,
@@ -2577,15 +2707,7 @@ with _main_tab1:
     )
 
 
-    # ════════════════════════════════════════════════════════
-    # 실지급 & 생활비 실적 추적
-    # ════════════════════════════════════════════════════════
-    st.divider()
-    st.markdown("## 📒 실지급 & 생활비 실적 관리")
-    st.caption(
-        "매월 실제 수령액과 지출액을 기록해 예측과 비교합니다. "
-        "구글 시트 **실적** 탭에 데이터를 입력하면 자동 반영됩니다."
-    )
+    # (실지급 실적 관리는 가계부 탭으로 이동됨)
 
     # ── 실적 시트 로드 ────────────────────────────────────
     ACTUAL_SHEET_GID = st.secrets.get("actual_gid", "")   # 실적 탭 gid (미설정 시 빈 문자열)
@@ -2663,96 +2785,4 @@ with _main_tab1:
                     with st.container(border=True):
                         st.markdown(
                             f"<div style='font-size:0.85rem; font-weight:700; "
-                            f"color:rgba(255,255,255,0.7);'>{row['연월']}</div>",
-                            unsafe_allow_html=True,
-                        )
-                        st.metric("총 수입",  f"{row['총수입']:,.0f}원")
-                        st.metric("생활비",   f"{row['생활비']:,.0f}원")
-                        st.metric(
-                            "잉여/부족",
-                            f"{row['잉여/부족']:+,.0f}원",
-                            delta_color="normal" if row["잉여/부족"] >= 0 else "inverse",
-                        )
-
-            # ── 예측 vs 실적 비교 차트 ────────────────────
-            st.markdown("#### 📈 예측 vs 실적 비교")
-            fig_act = go.Figure()
-
-            # 실적 총수입
-            fig_act.add_trace(go.Bar(
-                x=actual_df["연월"], y=actual_df["총수입"] / 10000,
-                name="실제 수입", marker_color="#87CEEB",
-                text=[f"{v/10000:.0f}만" for v in actual_df["총수입"]],
-                textposition="outside",
-            ))
-            # 실제 생활비
-            fig_act.add_trace(go.Bar(
-                x=actual_df["연월"], y=actual_df["생활비"] / 10000,
-                name="실제 생활비", marker_color="rgba(255,75,75,0.6)",
-                text=[f"{v/10000:.0f}만" for v in actual_df["생활비"]],
-                textposition="outside",
-            ))
-            # 목표 생활비 기준선
-            fig_act.add_hline(
-                y=target_monthly / 10000,
-                line_dash="dot", line_color="#FFD700", line_width=1.5,
-                annotation_text=f"목표 {target_monthly/10000:.0f}만원",
-                annotation_position="top right",
-                annotation_font_color="#FFD700",
-            )
-            fig_act.update_layout(
-                barmode="group", height=320,
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(255,255,255,0.02)",
-                font_color="white",
-                legend=dict(orientation="h", y=-0.25, xanchor="center", x=0.5),
-                margin=dict(t=20, b=70, l=10, r=10),
-                yaxis=dict(title="금액 (만원)", tickformat=","),
-                xaxis=dict(tickangle=-30),
-                hovermode="x unified",
-            )
-            st.plotly_chart(fig_act, use_container_width=True)
-
-            # ── 잉여/부족 추이 ────────────────────────────
-            gap_colors = ["#7dffb0" if v >= 0 else "#FF4B4B"
-                          for v in actual_df["잉여/부족"]]
-            fig_gap_act = go.Figure(go.Bar(
-                x=actual_df["연월"],
-                y=actual_df["잉여/부족"] / 10000,
-                marker_color=gap_colors,
-                text=[f"{v/10000:+.0f}만" for v in actual_df["잉여/부족"]],
-                textposition="outside",
-            ))
-            fig_gap_act.add_hline(y=0, line_color="rgba(255,255,255,0.2)", line_width=1)
-            fig_gap_act.update_layout(
-                height=240,
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(255,255,255,0.02)",
-                font_color="white",
-                margin=dict(t=10, b=50, l=10, r=10),
-                yaxis=dict(title="잉여/부족 (만원)", tickformat=","),
-                xaxis=dict(tickangle=-30),
-            )
-            st.plotly_chart(fig_gap_act, use_container_width=True)
-
-            # ── 수입원별 실적 테이블 ──────────────────────
-            with st.expander("📋 전체 실적 데이터", expanded=False):
-                display_actual = actual_df.copy()
-                for col in ["공무원연금","IRP분배금","ISA분배금","생활비","총수입","잉여/부족"]:
-                    if col in display_actual.columns:
-                        display_actual[col] = display_actual[col].apply(
-                            lambda v: f"{v:+,.0f}" if col == "잉여/부족" else f"{v:,.0f}"
-                        )
-                st.dataframe(display_actual, hide_index=True, use_container_width=True)
-
-            # ── 누적 성과 요약 ────────────────────────────
-            st.markdown("#### 📌 누적 실적 요약")
-            s1, s2, s3, s4 = st.columns(4)
-            s1.metric("총 수입 누계",  f"{actual_df['총수입'].sum():,.0f}원")
-            s2.metric("총 생활비 누계", f"{actual_df['생활비'].sum():,.0f}원")
-            s3.metric("누적 잉여/부족",
-                      f"{actual_df['잉여/부족'].sum():+,.0f}원",
-                      delta_color="normal" if actual_df["잉여/부족"].sum() >= 0 else "inverse")
-            avg_income = actual_df["총수입"].mean()
-            s4.metric("월 평균 수입",   f"{avg_income:,.0f}원",
-                      delta=f"목표 대비 {avg_income - target_monthly:+,.0f}원")
+                            f"color:rgba(255,255,255,0.7);'>{row['연월']}</di

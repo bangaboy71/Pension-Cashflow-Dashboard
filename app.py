@@ -2238,7 +2238,8 @@ with st.sidebar:
         load_watchlist.clear()
         st.session_state.pop("_data_loaded", None)
         st.rerun()
-    st.caption(f"워크시트: {WORKSHEET_NAME} · 캐시: {DATA_TTL}")
+    _sc_gid_hint = "" if SCENARIO_SHEET_GID else "  |  ⚠️ 시나리오 GID 미설정"
+    st.caption(f"워크시트: {WORKSHEET_NAME} · 캐시: {DATA_TTL}{_sc_gid_hint}")
 
 
 # ════════════════════════════════════════════════════════
@@ -2248,27 +2249,37 @@ with st.sidebar:
 # ── 시나리오 적용 ─────────────────────────────────────
 # 직접 작성 모드 우선 적용, 그 다음 시트 시나리오
 _sc_mode_val = st.session_state.get("sc_mode", "📋 시트 시나리오 선택")
+_sc_applied  = False   # 시나리오 적용 여부 플래그
+
 if _sc_mode_val == "✏️ 앱에서 직접 작성":
     _cs = st.session_state.get("_custom_sc", {})
     if _cs:
         if _cs.get("irp_total", 0) > 0: irp_total     = _cs["irp_total"]
         if _cs.get("isa_total", 0) > 0: isa_total     = _cs["isa_total"]
         if _cs.get("gen_total", 0) > 0: general_total = _cs["gen_total"]
-        if _input_mode == "📊 분배율(%)":
-            if _cs.get("irp_rate", 0) > 0: palantir_rate = _cs["irp_rate"]
-            if _cs.get("isa_rate", 0) > 0: kodex_rate    = _cs["isa_rate"]
-elif sc_choice != "기본 (시트 연금현황)" and sc_names:
+        if _cs.get("irp_rate", 0) > 0:  palantir_rate = _cs["irp_rate"]
+        if _cs.get("isa_rate", 0) > 0:  kodex_rate    = _cs["isa_rate"]
+        _sc_applied = True
+
+elif sc_choice != "기본 (시트 연금현황)" and not sc_df.empty:
     _sc = build_scenario_params(sc_df, sc_choice)
     # 원금 교체
-    irp_total     = _sc["irp_total"]   if _sc["irp_total"]  > 0 else irp_total
-    isa_total     = _sc["isa_total"]   if _sc["isa_total"]  > 0 else isa_total
-    general_total = _sc["gen_total"]   if _sc["gen_total"]  > 0 else general_total
-    # 분배율 교체 (분배금 직접 입력 모드가 아닐 때만)
-    if _input_mode == "📊 분배율(%)":
-        palantir_rate = _sc["irp_rate"] if _sc["irp_rate"] > 0 else palantir_rate
-        kodex_rate    = _sc["isa_rate"] if _sc["isa_rate"] > 0 else kodex_rate
+    if _sc["irp_total"]  > 0: irp_total     = _sc["irp_total"]
+    if _sc["isa_total"]  > 0: isa_total     = _sc["isa_total"]
+    if _sc["gen_total"]  > 0: general_total = _sc["gen_total"]
+    # 분배율 교체 — 모든 입력 모드에서 적용
+    # (시나리오 분배율로 분배금 재계산 → 실제 대시보드 수치 변화)
+    if _sc["irp_rate"] > 0:
+        palantir_rate  = _sc["irp_rate"]
+        irp_income_input = int(irp_total * palantir_rate)
+    if _sc["isa_rate"] > 0:
+        kodex_rate     = _sc["isa_rate"]
+        isa_income_input = int(isa_total * kodex_rate)
+    _sc_applied = True
 
-# 이번 달 분배금: 사이드바 직접 입력값 사용
+# 이번 달 분배금 확정
+# 시나리오 적용 시: 시나리오 분배율 기반 계산값 사용
+# 기본 모드:       사이드바 직접 입력값 사용
 irp_income   = float(irp_income_input)
 isa_income   = float(isa_income_input)
 ps_income    = float(ps_income_input) if ps_total > 0 else 0.0

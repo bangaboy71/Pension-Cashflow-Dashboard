@@ -14,7 +14,8 @@ SHEET_URL      = "https://docs.google.com/spreadsheets/d/14e_0SQaBFbyEC-16hEEqvr
 WORKSHEET_NAME = "연금현황"
 DATA_TTL            = "5m"
 REQUIRED_ITEMS      = ["공적연금", "IRP", "ISA", "목표생활비"]
-SCENARIO_SHEET_GID  = ""   # ← 시나리오 탭 gid(숫자) 입력. 탭이 없으면 직접 작성 모드만 활성화
+SCENARIO_SHEET_GID  = "961920932"   # ← 시나리오 탭 gid(숫자) 입력. 탭이 없으면 직접 작성 모드만 활성화
+HOUSEHOLD_SHEET_GID = "122998571"   # ← 가계부 탭 gid(숫자) 입력
 
 # ── 세금 상수 ─────────────────────────────────────────
 # 건강보험료: 지역가입자 기준 (건보 6.99% + 장기요양 0.9182% ≈ 7.09%)
@@ -25,6 +26,219 @@ ISA_TAX_FREE_MONTHLY   = 2_000_000 / 12
 # IRP·퇴직연금 분리과세: 5.5%
 IRP_TAX_RATE           = 0.055
 
+
+
+
+def _render_household_tab(
+    hh_df: pd.DataFrame,
+    display_income: float,
+    target_monthly: float,
+    public_pension: float,
+    irp_income: float,
+    isa_income: float,
+    now_kst,
+):
+    """월별 가계부 탭 렌더링"""
+    import calendar as _cal
+    from datetime import datetime as _dt
+
+    st.markdown("#### 📒 월별 가계부")
+
+    # ── 시트 미연동 안내 ────────────────────────────────
+    if hh_df.empty:
+        st.info(
+            "**구글 시트에 `가계부` 탭을 추가하고 아래 헤더로 구성하세요.**\n\n"
+            "```\n연월 | 구분 | 카테고리 | 항목 | 금액 | 비고\n```\n\n"
+            "| 연월 | 구분 | 카테고리 | 항목 | 금액 | 비고 |\n"
+            "|---|---|---|---|---|---|\n"
+            "| 2026-04 | 수입 | 공무원연금 | 공무원연금 | 3624210 | |\n"
+            "| 2026-04 | 수입 | IRP분배금 | IRP분배금 | 3827200 | |\n"
+            "| 2026-04 | 지출 | 식비 | 마트/외식 | 650000 | |\n"
+            "| 2026-04 | 지출 | 여행/여가 | 알프스 준비 | 500000 | |\n\n"
+            "탭 생성 후 gid를 `HOUSEHOLD_SHEET_GID`에 입력하세요."
+        )
+        # 시트 없어도 이번달 예상 수입 요약 표시
+        st.divider()
+        st.markdown("##### 📊 이번달 예상 수입 (시뮬레이션 기준)")
+        cur = _dt.now()
+        ym  = f"{cur.year}-{cur.month:02d}"
+        _c1, _c2, _c3, _c4 = st.columns(4)
+        _c1.metric("공무원연금", f"{public_pension:,.0f}원")
+        _c2.metric("IRP 분배금", f"{irp_income:,.0f}원")
+        _c3.metric("ISA 분배금", f"{isa_income:,.0f}원")
+        _c4.metric("합계", f"{display_income:,.0f}원")
+        return
+
+    # ── 연월 선택 ───────────────────────────────────────
+    all_ym = sorted(hh_df["연월"].unique(), reverse=True)
+    cur_ym = f"{_dt.now().year}-{_dt.now().month:02d}"
+    default_idx = 0
+    if cur_ym in all_ym:
+        default_idx = all_ym.index(cur_ym)
+
+    sel_col, _, _ = st.columns([2, 3, 3])
+    sel_ym = sel_col.selectbox(
+        "조회 연월", all_ym, index=default_idx, key="hh_ym_sel",
+        label_visibility="collapsed",
+    )
+
+    month_df = hh_df[hh_df["연월"] == sel_ym]
+    income_df = month_df[month_df["구분"] == "수입"]
+    expense_df = month_df[month_df["구분"] == "지출"]
+
+    total_income_hh  = income_df["금액"].sum()
+    total_expense_hh = expense_df["금액"].sum()
+    balance          = total_income_hh - total_expense_hh
+    bal_color        = "#7dffb0" if balance >= 0 else "#FF4B4B"
+
+    # ── 월별 요약 카드 ────────────────────────────────────
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("총 수입",   f"{total_income_hh:,.0f}원")
+    mc2.metric("총 지출",   f"{total_expense_hh:,.0f}원")
+    mc3.metric("잉여/부족", f"{balance:+,.0f}원",
+               delta_color="normal" if balance >= 0 else "inverse")
+    mc4.metric("목표 대비",
+               f"{(total_income_hh/target_monthly*100) if target_monthly > 0 else 0:.0f}%",
+               help="이번달 총 수입 ÷ 목표 생활비")
+
+    st.divider()
+    left_col, right_col = st.columns(2)
+
+    # ── 수입 내역 ─────────────────────────────────────────
+    with left_col:
+        st.markdown("**💰 수입 내역**")
+        if not income_df.empty:
+            inc_by_cat = income_df.groupby("카테고리")["금액"].sum().reset_index()
+            for _, row in inc_by_cat.iterrows():
+                st.markdown(
+                    f"<div style='display:flex; justify-content:space-between; "
+                    f"padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.05); "
+                    f"font-size:0.88rem;'>"
+                    f"<span style='color:rgba(255,255,255,0.7);'>{row['카테고리']}</span>"
+                    f"<span style='color:#7dffb0; font-weight:600;'>{row['금액']:,.0f}원</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            st.markdown(
+                f"<div style='display:flex; justify-content:space-between; "
+                f"padding:6px 0; font-size:0.9rem; font-weight:700; margin-top:4px;'>"
+                f"<span>합계</span>"
+                f"<span style='color:#7dffb0;'>{total_income_hh:,.0f}원</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.caption("수입 내역 없음")
+
+    # ── 지출 내역 ─────────────────────────────────────────
+    with right_col:
+        st.markdown("**💸 지출 내역**")
+        if not expense_df.empty:
+            exp_by_cat = expense_df.groupby("카테고리")["금액"].sum().reset_index()                                    .sort_values("금액", ascending=False)
+            for _, row in exp_by_cat.iterrows():
+                st.markdown(
+                    f"<div style='display:flex; justify-content:space-between; "
+                    f"padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.05); "
+                    f"font-size:0.88rem;'>"
+                    f"<span style='color:rgba(255,255,255,0.7);'>{row['카테고리']}</span>"
+                    f"<span style='color:#FF4B4B; font-weight:600;'>{row['금액']:,.0f}원</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            st.markdown(
+                f"<div style='display:flex; justify-content:space-between; "
+                f"padding:6px 0; font-size:0.9rem; font-weight:700; margin-top:4px;'>"
+                f"<span>합계</span>"
+                f"<span style='color:#FF4B4B;'>{total_expense_hh:,.0f}원</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            # 지출 도넛 차트
+            import plotly.express as _px
+            fig_d = _px.pie(
+                exp_by_cat, values="금액", names="카테고리",
+                hole=0.45,
+                color_discrete_sequence=["#87CEEB","#FFD700","#FF4B4B",
+                                          "#7dffb0","#AFA9EC","#FF8C00"],
+            )
+            fig_d.update_layout(
+                height=240, paper_bgcolor="rgba(0,0,0,0)",
+                font_color="white", showlegend=True,
+                legend=dict(orientation="h", y=-0.2, xanchor="center", x=0.5),
+                margin=dict(t=10, b=60, l=0, r=0),
+            )
+            st.plotly_chart(fig_d, use_container_width=True)
+        else:
+            st.caption("지출 내역 없음")
+
+    # ── 월별 수입/지출 추이 차트 ─────────────────────────
+    st.divider()
+    st.markdown("**📈 월별 수입·지출 추이**")
+    monthly_hh = hh_df.groupby(["연월","구분"])["금액"].sum().unstack(fill_value=0).reset_index()
+    if "수입" not in monthly_hh.columns: monthly_hh["수입"] = 0
+    if "지출" not in monthly_hh.columns: monthly_hh["지출"] = 0
+    monthly_hh["잉여"] = monthly_hh["수입"] - monthly_hh["지출"]
+
+    import plotly.graph_objects as _go
+    fig_trend = _go.Figure()
+    fig_trend.add_trace(_go.Bar(
+        x=monthly_hh["연월"], y=monthly_hh["수입"]/10000,
+        name="수입", marker_color="rgba(125,255,176,0.7)",
+    ))
+    fig_trend.add_trace(_go.Bar(
+        x=monthly_hh["연월"], y=monthly_hh["지출"]/10000,
+        name="지출", marker_color="rgba(255,75,75,0.7)",
+    ))
+    fig_trend.add_trace(_go.Scatter(
+        x=monthly_hh["연월"], y=monthly_hh["잉여"]/10000,
+        name="잉여/부족", mode="lines+markers",
+        line=dict(color="#FFD700", width=2),
+    ))
+    fig_trend.add_hline(
+        y=target_monthly/10000, line_dash="dot",
+        line_color="rgba(255,255,255,0.3)", line_width=1,
+        annotation_text=f"목표 {target_monthly/10000:.0f}만",
+        annotation_font_color="rgba(255,255,255,0.4)",
+    )
+    fig_trend.update_layout(
+        barmode="group", height=300,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(255,255,255,0.02)",
+        font_color="white",
+        legend=dict(orientation="h", y=-0.25, xanchor="center", x=0.5),
+        margin=dict(t=10, b=70, l=10, r=10),
+        yaxis=dict(title="만원", tickformat=","),
+        xaxis=dict(tickangle=-30),
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig_trend, use_container_width=True)
+
+    # ── 연간 누계 테이블 ─────────────────────────────────
+    st.divider()
+    st.markdown("**📆 연간 누계**")
+    hh_df["연도"] = hh_df["연월"].str[:4]
+    annual_hh = hh_df.groupby(["연도","구분"])["금액"].sum().unstack(fill_value=0).reset_index()
+    if "수입" not in annual_hh.columns: annual_hh["수입"] = 0
+    if "지출" not in annual_hh.columns: annual_hh["지출"] = 0
+    annual_hh["잉여"] = annual_hh["수입"] - annual_hh["지출"]
+    for col in ["수입","지출","잉여"]:
+        annual_hh[col] = (annual_hh[col]/10000).round(1)
+    st.dataframe(
+        annual_hh.rename(columns={"수입":"수입(만원)","지출":"지출(만원)","잉여":"잉여(만원)"}),
+        hide_index=True, use_container_width=True,
+        column_config={
+            "수입(만원)": st.column_config.NumberColumn(format="%,.1f"),
+            "지출(만원)": st.column_config.NumberColumn(format="%,.1f"),
+            "잉여(만원)": st.column_config.NumberColumn(format="%+.1f"),
+        },
+    )
+
+    # ── 이번달 상세 내역 ─────────────────────────────────
+    with st.expander("📋 이번달 상세 내역"):
+        disp = month_df[["구분","카테고리","항목","금액"] +
+                        (["비고"] if "비고" in month_df.columns else [])].copy()
+        disp["금액"] = disp["금액"].apply(lambda x: f"{x:,.0f}")
+        st.dataframe(disp, hide_index=True, use_container_width=True)
 
 def calc_target_expense(
     age: int,
@@ -428,6 +642,46 @@ def build_scenario_params(sc_df: pd.DataFrame, sc_name: str) -> dict:
     return result
 
 
+
+# ── 지출 카테고리 정의 ────────────────────────────────
+EXPENSE_CATEGORIES = ["식비", "주거/관리비", "의료/건강", "여행/여가", "교통/통신", "기타"]
+INCOME_CATEGORIES  = ["공무원연금", "IRP분배금", "ISA분배금", "일반분배금", "기타수입"]
+
+
+@st.cache_data(ttl=DATA_TTL, show_spinner=False)
+def load_household(url: str, gid: str) -> pd.DataFrame:
+    """
+    구글 시트 '가계부' 탭 로드.
+    헤더: 연월 | 구분 | 카테고리 | 항목 | 금액 | 비고
+    구분: 수입 / 지출
+    """
+    if not gid or not str(gid).strip().isdigit():
+        return pd.DataFrame()
+    try:
+        import re as _re
+        match = _re.search(r"/d/([a-zA-Z0-9_-]+)", url)
+        if not match:
+            return pd.DataFrame()
+        sid = match.group(1)
+        df  = pd.read_csv(
+            f"https://docs.google.com/spreadsheets/d/{sid}"
+            f"/export?format=csv&gid={gid}"
+        )
+        if df.empty or "연월" not in df.columns:
+            return pd.DataFrame()
+        df["금액"] = pd.to_numeric(
+            df["금액"].astype(str).str.replace(",", ""),
+            errors="coerce"
+        ).fillna(0)
+        df["연월"] = df["연월"].astype(str).str.strip()
+        df["구분"] = df["구분"].astype(str).str.strip()
+        df["카테고리"] = df["카테고리"].astype(str).str.strip()
+        df["항목"]     = df["항목"].astype(str).str.strip()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
 @st.cache_data(ttl=DATA_TTL, show_spinner=False)
 def load_and_validate(url: str, gid: str) -> tuple[pd.DataFrame, list[str]]:
     """시트 로드 + 유효성 검사 결과를 캐시해 반환"""
@@ -516,6 +770,13 @@ with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as
     except Exception:
         sc_df    = pd.DataFrame()
         sc_names = []
+
+    # STEP 5 — 가계부 로드
+    st.write("📒 가계부 데이터 로드 중...")
+    try:
+        hh_df = load_household(SHEET_URL, HOUSEHOLD_SHEET_GID)
+    except Exception:
+        hh_df = pd.DataFrame()
 
     st.write("✨ 준비 완료...")
     _cache_info = (
@@ -884,6 +1145,7 @@ with st.sidebar:
         load_sheet.clear()
         load_and_validate.clear()
         load_scenarios.clear()
+        load_household.clear()
         st.session_state.pop("_data_loaded", None)
         st.rerun()
     st.caption(f"워크시트: {WORKSHEET_NAME} · 캐시: {DATA_TTL}")
@@ -967,6 +1229,17 @@ if sc_choice != "기본 (시트 연금현황)" and sc_names:
         unsafe_allow_html=True,
     )
 
+# ── 메인 탭 ──────────────────────────────────────────
+_main_tab1, _main_tab2 = st.tabs(["📊 현금흐름 대시보드", "📒 월별 가계부"])
+
+with _main_tab2:
+    _render_household_tab(hh_df, display_income, target_monthly, public_pension,
+                          irp_income, isa_income, now_kst=datetime.now())
+
+with _main_tab1:
+    pass   # 대시보드 내용은 아래 기존 코드가 탭 밖에서 렌더링됨
+
+# ── 아래부터는 대시보드 탭 내용 (기존 코드 유지) ──────
 tax_label = "세후 " if show_tax else "세전 "
 st.markdown(
     f"### 현재 예상 월 수입 ({tax_label}): "

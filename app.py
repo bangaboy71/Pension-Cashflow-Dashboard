@@ -127,6 +127,21 @@ def _render_household_tab(
                 f"</div>",
                 unsafe_allow_html=True,
             )
+            # 수입 도넛 차트
+            import plotly.express as _px
+            fig_inc = _px.pie(
+                inc_by_cat, values="금액", names="카테고리",
+                hole=0.45,
+                color_discrete_sequence=["#7dffb0","#87CEEB","#FFD700",
+                                          "#AFA9EC","#FF8C00","#5DCAA5"],
+            )
+            fig_inc.update_layout(
+                height=240, paper_bgcolor="rgba(0,0,0,0)",
+                font_color="white", showlegend=True,
+                legend=dict(orientation="h", y=-0.2, xanchor="center", x=0.5),
+                margin=dict(t=10, b=60, l=0, r=0),
+            )
+            st.plotly_chart(fig_inc, use_container_width=True)
         else:
             st.caption("수입 내역 없음")
 

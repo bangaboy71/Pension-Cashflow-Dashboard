@@ -1722,7 +1722,7 @@ def extract_values(df: pd.DataFrame) -> dict:
         "target_monthly":   safe_get(df, "목표생활비",    default=1.0),
         "default_palantir": safe_get(df, "IRP기본분배율",  default=1.2),
         "default_kodex":    safe_get(df, "ISA기본분배율",  default=0.8),
-        "default_general":  safe_get(df, "일반기본분배율", default=0.1),
+        "default_general":  safe_get(df, "일반기본분배율", default=2.88),  # 연간 분배율(%)
         # 보유 수량 (주당 분배금 입력 모드에 사용)
         "irp_shares":       safe_get(df, "IRP수량",  default=0.0),
         "isa_shares":       safe_get(df, "ISA수량",  default=0.0),
@@ -2712,8 +2712,9 @@ with _main_tab1:
                         )
 
         # 실제 수령액 (세전 기준)
-        _gen_rate_now    = float(st.session_state.get("general_rate_hm", 0.001))
-        _gen_actual      = general_total * _gen_rate_now
+        # general_rate_hm = 연분배율/100/12 (월 환산율)
+        _gen_rate_now    = float(st.session_state.get("general_rate_hm", 2.88/100/12))
+        _gen_actual      = general_total * _gen_rate_now   # 월 평균 수령액
 
         _withdrawal_card_v2(
             w1, "💼 IRP", "#FFD700",
@@ -2884,15 +2885,16 @@ with _main_tab1:
 
         # 일반 계좌 카드 (잔액 있을 때만)
         if general_total > 0:
-            _gen_rate_now = float(st.session_state.get("general_rate_hm", 0.001))
-            _gen_inc  = general_total * _gen_rate_now
+            _gen_rate_now = float(st.session_state.get("general_rate_hm", 2.88/100/12))
+            _gen_inc  = general_total * _gen_rate_now   # 월 평균 (연분배금÷12)
             _gen_tax  = _gen_inc * 0.154
             _gen_net  = _gen_inc - _gen_tax
             with st.container(border=True):
                 _gen_lbl = "  ·  ".join(n[:14] for n in _gen_names[:2]) if _gen_names else "일반계좌"
                 st.markdown(f"**💵 일반 ({_gen_lbl})**")
                 ga, gb = st.columns(2)
-                ga.metric("세전", f"{_gen_inc:,.0f}원")
+                ga.metric("세전", f"{_gen_inc:,.0f}원",
+                          help="연간 분배금 ÷ 12 (월 평균)")
                 gb.metric("배당소득세 15.4%", f"-{_gen_tax:,.0f}원", delta_color="inverse")
                 st.markdown(
                     f"<div style='text-align:right; font-size:1.1rem; "
@@ -2900,6 +2902,9 @@ with _main_tab1:
                     f"실수령 {_gen_net:,.0f}원</div>",
                     unsafe_allow_html=True
                 )
+                _gen_annual_val = _gen_inc * 12
+                st.caption(f"연 분배금 {_gen_annual_val:,.0f}원 ÷ 12 = 월 {_gen_inc:,.0f}원 "
+                           f"(실제 입금: 연 1회)")
 
         # 합계
         with st.container(border=True):
@@ -2924,7 +2929,7 @@ with _main_tab1:
         st.markdown("#### 📊 세전 vs 세후 비교")
 
         # 세전·세후 비교 막대차트
-        _gen_rate_bar = float(st.session_state.get("general_rate_hm", 0.001))
+        _gen_rate_bar = float(st.session_state.get("general_rate_hm", 2.88/100/12))
         _gen_inc_bar  = general_total * _gen_rate_bar
         _gen_net_bar  = _gen_inc_bar * (1 - 0.154)
         _bar_구분 = ["공적연금","IRP"] + (["ISA"]) + (["일반"] if general_total>0 else [])
@@ -3725,12 +3730,17 @@ with _main_tab1:
     with st.sidebar:
         st.divider()
         st.subheader("📅 히트맵 설정")
-        general_rate_hm = st.slider(
-            "일반(머니마켓) 월 분배율 (%)",
-            min_value=0.0, max_value=1.0,
-            value=float(default_general), step=0.01,
-            key="general_rate_hm",
-        ) / 100
+        _gen_annual_rate = st.slider(
+            "일반(머니마켓) 연 분배율 (%)",
+            min_value=0.0, max_value=10.0,
+            value=float(default_general), step=0.1,
+            key="general_rate_hm_annual",
+            help="연간 분배율 입력 → 월 수령액은 연간 분배금 ÷ 12로 계산",
+        )
+        general_rate_hm = _gen_annual_rate / 100 / 12   # 월 환산율 (내부 계산용)
+        st.session_state["general_rate_hm"] = general_rate_hm
+        st.caption(f"월 환산: {_gen_annual_rate/12:.3f}% · 예상 연 분배금 "
+                   f"{general_total * _gen_annual_rate / 100:,.0f}원")
 
     hm_df = build_monthly_cashflow(
         start_year    = min(current_year, retire_year),

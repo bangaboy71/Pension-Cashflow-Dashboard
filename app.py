@@ -2642,6 +2642,7 @@ with _main_tab1:
         with st.container(border=True):
             _irp_lbl = '  ·  '.join(n[:14] for n in _irp_names[:2]) if _irp_names else '팔란티어 커버드콜'
             st.markdown(f"**💼 IRP ({_irp_lbl})**")
+            da, db = st.columns(2)
             da.metric("세전", f"{tax_result['IRP_세전']:,.0f}원")
             db.metric("연금소득세 5.5%", f"-{tax_result['IRP_세금']:,.0f}원",
                       delta_color="inverse")
@@ -2670,6 +2671,7 @@ with _main_tab1:
         with st.container(border=True):
             _isa_lbl = '  ·  '.join(n[:14] for n in _isa_names[:2]) if _isa_names else 'KODEX 위클리커버드콜'
             st.markdown(f"**📦 ISA ({_isa_lbl})**")
+            ea, eb = st.columns(2)
             ea.metric("세전", f"{tax_result['ISA_세전']:,.0f}원")
             eb.metric("분리과세 9.9%", f"-{tax_result['ISA_세금']:,.0f}원",
                       delta_color="inverse",

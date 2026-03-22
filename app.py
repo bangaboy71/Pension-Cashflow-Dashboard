@@ -24,6 +24,8 @@ WATCHLIST_SHEET_GID = "142238543"
 HEALTH_INS_RATE        = 0.0709
 # ISA 비과세 한도: 연 200만원 → 월 환산
 ISA_TAX_FREE_MONTHLY   = 2_000_000 / 12
+ISA_ANNUAL_LIMIT       = 20_000_000        # 연간 납입 한도 (소득세법 §91의18)
+ISA_LIMIT              = 40_000_000        # 현재 누적 한도 (가입 2년차 기준 — 매년 갱신)
 # IRP·퇴직연금·연금저축 분리과세: 5.5% (소득세법 §129 ①5호)
 IRP_TAX_RATE           = 0.055
 PS_TAX_RATE            = 0.055   # 연금저축 (pension saving)
@@ -1622,7 +1624,11 @@ def build_scenario_params(sc_df: pd.DataFrame, sc_name: str) -> dict:
         w_rate            = (total_monthly / total * 100) if total > 0 else 0.0
         result[f"{acc_en}_total"] = total
         result[f"{acc_en}_rate"]  = w_rate / 100
-        result[f"{acc_en}_종목"]  = rows[["종목명","원금","분배율(%)"]].to_dict("records")
+        _cols = ["종목명","원금","분배율(%)"]
+        for _extra in ["수량","주당분배금","현재가"]:
+            if _extra in rows.columns:
+                _cols.append(_extra)
+        result[f"{acc_en}_종목"]  = rows[_cols].to_dict("records")
     return result
 
 
@@ -1720,6 +1726,7 @@ def extract_values(df: pd.DataFrame) -> dict:
         # 보유 수량 (주당 분배금 입력 모드에 사용)
         "irp_shares":       safe_get(df, "IRP수량",  default=0.0),
         "isa_shares":       safe_get(df, "ISA수량",  default=0.0),
+        "isa_limit":        safe_get(df, "ISA납입한도", default=float(ISA_LIMIT)),
         # 주당 기본 분배금 (시트에 있으면 초기값으로 사용)
         "irp_dps_default":  safe_get(df, "IRP주당분배금",    default=0.0),
         "isa_dps_default":  safe_get(df, "ISA주당분배금",    default=0.0),
@@ -1780,6 +1787,7 @@ with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as
     default_general  = _vals["default_general"]
     irp_shares       = _vals["irp_shares"]
     isa_shares       = _vals["isa_shares"]
+    isa_limit        = _vals.get("isa_limit", float(ISA_LIMIT))
     irp_dps_default  = _vals["irp_dps_default"]
     isa_dps_default  = _vals["isa_dps_default"]
     ps_total         = _vals["ps_total"]
@@ -2548,13 +2556,52 @@ with _main_tab1:
         st.markdown("**각 계좌별 필요 인출액 및 권장 분배율**")
         w1, w2, w3 = st.columns(3)
 
-        # ── 수량 조정 데이터 준비 ─────────────────────────
-        _irp_shares_cur  = float(st.session_state.get("irp_shares_input",
-                                  _vals.get("irp_shares", 0)))
-        _isa_shares_cur  = float(st.session_state.get("isa_shares_input",
-                                  _vals.get("isa_shares", 0)))
-        _irp_dps_cur     = float(st.session_state.get("irp_dps", _vals.get("irp_dps_default", 0)))
-        _isa_dps_cur     = float(st.session_state.get("isa_dps", _vals.get("isa_dps_default", 0)))
+        # ── 수량·DPS 데이터 준비 — 시나리오 종목 우선 ────
+        def _sc_shares_dps(acc_kr):
+            """시나리오 종목에서 수량·DPS 추출. 없으면 원금÷현재가 역산."""
+            key = {"IRP":"irp","ISA":"isa","일반":"gen"}.get(acc_kr,"irp")
+            items = _sc.get(f"{key}_종목", []) if _sc_applied else []
+            total_qty, total_dps = 0.0, 0.0
+            for it in items:
+                qty  = float(it.get("수량", 0) or 0)
+                dps  = float(it.get("주당분배금", 0) or 0)
+                amt  = float(it.get("원금", 0) or 0)
+                price= float(it.get("현재가", 0) or 0)
+                # 수량 없으면 원금÷현재가 역산
+                if qty == 0 and amt > 0 and price > 0:
+                    qty = amt / price
+                total_qty += qty
+                if dps > 0:
+                    total_dps = dps  # 마지막 종목 DPS (단일 종목 기준)
+            return total_qty, total_dps
+
+        # 시나리오 적용 여부에 따라 참조 데이터 결정
+        if _sc_applied and not sc_df.empty:
+            _irp_sc = _sc if "_sc" in dir() else {}
+            _irp_shares_cur, _irp_dps_cur = _sc_shares_dps("IRP")
+            _isa_shares_cur, _isa_dps_cur = _sc_shares_dps("ISA")
+            # 시나리오에 수량 없으면 연금현황 폴백
+            if _irp_shares_cur == 0:
+                _irp_shares_cur = float(st.session_state.get("irp_shares_input",
+                                         _vals.get("irp_shares", 0)))
+            if _isa_shares_cur == 0:
+                _isa_shares_cur = float(st.session_state.get("isa_shares_input",
+                                         _vals.get("isa_shares", 0)))
+            if _irp_dps_cur == 0:
+                _irp_dps_cur = float(st.session_state.get("irp_dps",
+                                      _vals.get("irp_dps_default", 0)))
+            if _isa_dps_cur == 0:
+                _isa_dps_cur = float(st.session_state.get("isa_dps",
+                                      _vals.get("isa_dps_default", 0)))
+        else:
+            _irp_shares_cur = float(st.session_state.get("irp_shares_input",
+                                     _vals.get("irp_shares", 0)))
+            _isa_shares_cur = float(st.session_state.get("isa_shares_input",
+                                     _vals.get("isa_shares", 0)))
+            _irp_dps_cur    = float(st.session_state.get("irp_dps",
+                                     _vals.get("irp_dps_default", 0)))
+            _isa_dps_cur    = float(st.session_state.get("isa_dps",
+                                     _vals.get("isa_dps_default", 0)))
 
         # ── 계좌간 원금 조정 분석 ─────────────────────────
         # 세후 효율 비교: ISA > IRP (ISA 비과세 한도 내)
@@ -2579,7 +2626,7 @@ with _main_tab1:
                                 need_gross, rate_suggest, total_asset,
                                 current_rate, actual_income,
                                 shares_cur=0, dps_cur=0,
-                                acc_key="irp"):
+                                acc_key="irp", isa_limit=ISA_LIMIT):
             with col:
                 with st.container(border=True):
                     # 헤더
@@ -2588,6 +2635,26 @@ with _main_tab1:
                         f"font-size:0.95rem; margin-bottom:6px;'>{label}</div>",
                         unsafe_allow_html=True,
                     )
+
+                    # ISA 전용: 납입 한도 제약 표시
+                    if acc_key == "isa":
+                        _isa_used_pct = (total_asset / isa_limit * 100) if isa_limit > 0 else 0
+                        _isa_remain   = max(0, isa_limit - total_asset)
+                        _limit_c      = "#FF4B4B" if _isa_used_pct >= 100 else "#FFD700"
+                        st.markdown(
+                            f"<div style='font-size:0.75rem; padding:4px 8px; "
+                            f"border-radius:4px; background:rgba(255,215,0,0.08); "
+                            f"margin-bottom:6px;'>"
+                            f"<span style='color:{_limit_c};'>🔒 ISA 납입 한도</span>  "
+                            f"현재 {total_asset/10_000_000:.0f}천만 / "
+                            f"한도 {isa_limit/10_000_000:.0f}천만원  "
+                            f"{'<b>한도 소진</b>' if _isa_remain==0 else f'잔여 {_isa_remain/10_000_000:.0f}천만'}"
+                            f"</div>"
+                            f"<div style='font-size:0.72rem; color:rgba(255,165,0,0.8); "
+                            f"margin-bottom:4px;'>"
+                            f"⚠️ 원금만 자유 인출 · 이익은 만기 후 비과세 수령</div>",
+                            unsafe_allow_html=True,
+                        )
 
                     # ① 과부족 표시
                     _surplus     = actual_income - need_gross
@@ -2658,7 +2725,8 @@ with _main_tab1:
             w2, "📦 ISA", "#FF4B4B",
             wp["isa_need_gross"], wp["isa_rate_suggest"],
             isa_total, kodex_rate, isa_income,
-            shares_cur=_isa_shares_cur, dps_cur=_isa_dps_cur, acc_key="isa",
+            shares_cur=_isa_shares_cur, dps_cur=_isa_dps_cur,
+            acc_key="isa", isa_limit=float(isa_limit),
         )
         _withdrawal_card_v2(
             w3, "💵 일반", "#87CEEB",

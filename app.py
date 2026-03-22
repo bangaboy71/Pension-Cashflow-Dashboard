@@ -442,6 +442,59 @@ def fetch_watchlist_prices(codes: tuple) -> dict:
                 results[c] = (0, 0.0, 0.0)
     return results
 
+
+@st.cache_data(ttl="10m", show_spinner=False)
+def fetch_price_history(code: str, pages: int = 5) -> pd.DataFrame:
+    """
+    네이버 금융 일별 시세 → DataFrame 반환.
+    columns: 날짜, 종가, 전일비, 등락률, 거래량
+    pages: 수집 페이지 수 (1page = 10거래일, 기본 5page = 50거래일)
+    """
+    if not code or str(code).strip() == "":
+        return pd.DataFrame()
+    try:
+        import requests as _req
+        from bs4 import BeautifulSoup as _BS
+        code = str(code).strip()
+        rows = []
+        for page in range(1, pages + 1):
+            url = (
+                f"https://finance.naver.com/item/sise_day.naver"
+                f"?code={code}&page={page}"
+            )
+            res = _req.get(url,
+                           headers={"User-Agent": "Mozilla/5.0",
+                                    "Referer": "https://finance.naver.com"},
+                           timeout=4)
+            res.encoding = "euc-kr"
+            soup = _BS(res.text, "html.parser")
+            trs  = soup.select("table.type2 tr")
+            for tr in trs:
+                tds = tr.select("td")
+                if len(tds) < 7:
+                    continue
+                date_txt = tds[0].get_text(strip=True)
+                close_txt = tds[1].get_text(strip=True).replace(",", "")
+                if not date_txt or not close_txt:
+                    continue
+                try:
+                    rows.append({
+                        "날짜":   date_txt,
+                        "종가":   int(close_txt),
+                        "거래량": tds[6].get_text(strip=True).replace(",",""),
+                    })
+                except Exception:
+                    continue
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        df["날짜"]   = pd.to_datetime(df["날짜"], format="%Y.%m.%d", errors="coerce")
+        df["거래량"] = pd.to_numeric(df["거래량"], errors="coerce").fillna(0)
+        df = df.dropna(subset=["날짜"]).sort_values("날짜").reset_index(drop=True)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
 # 관심종목 연금 특화 분석 데이터
 # ──────────────────────────────────────────────────────
 WATCHLIST_RESEARCH = {
@@ -768,6 +821,108 @@ def _render_watchlist_tab(
                 f"</div>",
                 unsafe_allow_html=True,
             )
+
+    # ── 주가 추이 차트 ──────────────────────────────────
+    _sel_code = str(sel_row.get("종목코드", "")).strip()
+    if _sel_code and _sel_code not in ("", "nan", "0"):
+        with st.container(border=True):
+            _chart_cols = st.columns([4, 1])
+            with _chart_cols[1]:
+                _period = st.radio(
+                    "기간",
+                    ["1개월", "3개월", "6개월"],
+                    index=1,
+                    key="wl_chart_period",
+                    horizontal=False,
+                )
+            _pages_map = {"1개월": 2, "3개월": 5, "6개월": 13}
+            _pages = _pages_map.get(_period, 5)
+
+            hist_df = fetch_price_history(_sel_code, pages=_pages)
+
+            with _chart_cols[0]:
+                if hist_df.empty:
+                    st.caption("주가 데이터를 불러올 수 없습니다.")
+                else:
+                    _curr_p  = int(sel_row.get("현재가_실시간", 0))
+                    _tgt_p   = float(sel_row.get("목표가", 0))
+                    _last_p  = hist_df["종가"].iloc[-1]
+                    _first_p = hist_df["종가"].iloc[0]
+                    _chg_pct = (_last_p / _first_p - 1) * 100 if _first_p > 0 else 0
+                    _line_c  = "#7dffb0" if _chg_pct >= 0 else "#FF4B4B"
+
+                    fig_hist = go.Figure()
+
+                    # 종가 라인
+                    fig_hist.add_trace(go.Scatter(
+                        x=hist_df["날짜"], y=hist_df["종가"],
+                        mode="lines",
+                        name="종가",
+                        line=dict(color=_line_c, width=2),
+                        fill="tozeroy",
+                        fillcolor=f"rgba({','.join(str(int(c,16)) for c in [_line_c[1:3],_line_c[3:5],_line_c[5:7]])+',0.08'})",
+                    ))
+
+                    # 목표가 수평선
+                    if _tgt_p > 0:
+                        fig_hist.add_hline(
+                            y=_tgt_p,
+                            line_dash="dot", line_color="#FFD700", line_width=1.5,
+                            annotation_text=f"목표 {_tgt_p:,.0f}원",
+                            annotation_position="top right",
+                            annotation_font_color="#FFD700",
+                            annotation_font_size=11,
+                        )
+
+                    # 현재가 수평선 (크롤링값 있을 때)
+                    if _curr_p > 0 and _curr_p != _last_p:
+                        fig_hist.add_hline(
+                            y=_curr_p,
+                            line_dash="dash", line_color="rgba(255,255,255,0.4)",
+                            line_width=1,
+                            annotation_text=f"현재 {_curr_p:,.0f}원",
+                            annotation_position="bottom right",
+                            annotation_font_color="rgba(255,255,255,0.5)",
+                            annotation_font_size=10,
+                        )
+
+                    fig_hist.update_layout(
+                        title=dict(
+                            text=f"📈 {sel_stock} 주가 추이  "
+                                 f"<span style='font-size:13px; color:{'#7dffb0' if _chg_pct>=0 else '#FF4B4B'};'>"
+                                 f"{_chg_pct:+.1f}% ({_period})</span>",
+                            x=0.01, font_size=14,
+                        ),
+                        height=300,
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(255,255,255,0.02)",
+                        font_color="white",
+                        margin=dict(t=50, b=20, l=10, r=10),
+                        xaxis=dict(
+                            tickformat="%m/%d",
+                            tickangle=-30,
+                            showgrid=False,
+                        ),
+                        yaxis=dict(
+                            tickformat=",",
+                            showgrid=True,
+                            gridcolor="rgba(255,255,255,0.05)",
+                        ),
+                        showlegend=False,
+                        hovermode="x unified",
+                    )
+                    st.plotly_chart(fig_hist, use_container_width=True)
+
+                    # 기간 요약 메트릭
+                    _m1, _m2, _m3, _m4 = st.columns(4)
+                    _m1.metric("시작가", f"{_first_p:,.0f}원")
+                    _m2.metric("현재가", f"{_last_p:,.0f}원",
+                               delta=f"{_chg_pct:+.1f}%",
+                               delta_color="normal" if _chg_pct >= 0 else "inverse")
+                    _m3.metric("고가", f"{hist_df['종가'].max():,.0f}원")
+                    _m4.metric("저가", f"{hist_df['종가'].min():,.0f}원")
+    else:
+        st.caption("💡 시트에 종목코드를 입력하면 주가 추이 차트가 표시됩니다.")
 
     # ══════════════════════════════════════════════════
     # 섹션 4: 계좌별 교체 시뮬레이터

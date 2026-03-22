@@ -706,6 +706,9 @@ def _render_watchlist_tab(
             return
 
     # ══════════════════════════════════════════════════
+    # ── 계좌별 잔액 맵 (모든 섹션에서 공통 사용) ──────────
+    _acc_map = {"IRP": irp_total, "ISA": isa_total, "일반": general_total, "연금저축": ps_total}
+
     # 섹션 1: 관심종목 현황 테이블
     # ══════════════════════════════════════════════════
     st.markdown("**① 관심종목 현황**")
@@ -745,17 +748,16 @@ def _render_watchlist_tab(
 
     _disp = disp_wl[[c for c in _show_cols if c in disp_wl.columns]].copy()
 
-    # 갱신 버튼
-    _rcol1, _rcol2 = st.columns([6,1])
+    # 갱신 버튼 + 상태 캡션 한 줄 배치
+    _info_txt = (f"실시간 주가 반영 (캐시 3분) | {len(price_map)}종목"
+                 if price_map else "시트에 종목코드를 추가하면 실시간 주가가 연동됩니다.")
+    _rcol1, _rcol2 = st.columns([8, 1])
+    _rcol1.caption(_info_txt)
     with _rcol2:
-        if st.button("🔄 주가갱신", key="wl_price_refresh"):
+        if st.button("🔄", key="wl_price_refresh", help="주가 새로고침",
+                     use_container_width=True):
             fetch_watchlist_prices.clear()
             st.rerun()
-    with _rcol1:
-        if price_map:
-            st.caption(f"실시간 주가 반영 (캐시 3분) | {len(price_map)}종목")
-        else:
-            st.caption("시트에 종목코드 컬럼을 추가하면 실시간 주가가 연동됩니다.")
 
     _col_cfg = {
         "목표가":       st.column_config.NumberColumn("목표가(원)",     format="%,.0f"),

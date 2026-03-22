@@ -14,7 +14,6 @@ SHEET_URL      = "https://docs.google.com/spreadsheets/d/14e_0SQaBFbyEC-16hEEqvr
 WORKSHEET_NAME = "연금현황"
 DATA_TTL            = "5m"
 REQUIRED_ITEMS      = ["공적연금", "IRP", "ISA", "목표생활비"]  # 연금저축은 선택(없으면 0)
-SCENARIO_SHEET_GID  = ""   # ← 시나리오 탭 gid(숫자) 입력. 탭이 없으면 직접 작성 모드만 활성화
 SCENARIO_SHEET_GID  = "961920932"   # ← 시나리오 탭 gid(숫자) 입력. 탭이 없으면 직접 작성 모드만 활성화
 HOUSEHOLD_SHEET_GID = "122998571"   # ← 가계부 탭 gid(숫자) 입력
 WATCHLIST_SHEET_GID = "142238543"
@@ -391,6 +390,58 @@ actual_gid = "여기에_실적탭_gid"
 
 
 # ──────────────────────────────────────────────────────
+
+# ── 관심종목 실시간 주가 수집 ─────────────────────────
+def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
+    """
+    종목코드 → (현재가, 전일대비%, 등락) 반환.
+    네이버 금융 크롤링. 실패 시 (0, 0.0, 0.0).
+    """
+    if not code or str(code).strip() == "":
+        return 0, 0.0, 0.0
+    try:
+        import requests as _req
+        from bs4 import BeautifulSoup as _BS
+        code = str(code).strip().replace(".KS","").replace(".KQ","")
+        res = _req.get(
+            f"https://finance.naver.com/item/main.naver?code={code}",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=4,
+        )
+        soup = _BS(res.text, "html.parser")
+        now_p = int(
+            soup.find("div", {"class": "today"})
+                .find("span", {"class": "blind"}).text.replace(",", "")
+        )
+        prev_p = int(
+            soup.find("td", {"class": "first"})
+                .find("span", {"class": "blind"}).text.replace(",", "")
+        )
+        chg_pct = ((now_p - prev_p) / prev_p * 100) if prev_p > 0 else 0.0
+        chg_amt = now_p - prev_p
+        return now_p, round(chg_pct, 2), chg_amt
+    except Exception:
+        return 0, 0.0, 0.0
+
+
+@st.cache_data(ttl="3m", show_spinner=False)
+def fetch_watchlist_prices(codes: tuple) -> dict:
+    """
+    관심종목 코드 리스트 → {코드: (현재가, 전일대비%, 전일대비금액)} 딕셔너리.
+    캐시 3분. 병렬 수집.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _asc
+    results = {}
+    with ThreadPoolExecutor(max_workers=min(len(codes), 8)) as ex:
+        futures = {ex.submit(_fetch_price_by_code, c): c for c in codes}
+        for fut in _asc(futures):
+            c = futures[fut]
+            try:
+                results[c] = fut.result()
+            except Exception:
+                results[c] = (0, 0.0, 0.0)
+    return results
+
 # 관심종목 연금 특화 분석 데이터
 # ──────────────────────────────────────────────────────
 WATCHLIST_RESEARCH = {
@@ -435,6 +486,44 @@ def _render_watchlist_tab(
 ):
     """🔍 관심종목 탭 — 5개 섹션"""
     st.markdown("#### 🔍 관심종목 연금 포트폴리오 분석")
+
+    # ── 실시간 주가 수집 ─────────────────────────────────
+    _has_code = (not wl_df.empty and "종목코드" in wl_df.columns
+                 and wl_df["종목코드"].astype(str).str.strip().ne("").any())
+    price_map = {}
+    if _has_code:
+        _codes = tuple(
+            str(c).strip() for c in wl_df["종목코드"].dropna()
+            if str(c).strip() not in ("", "nan", "0")
+        )
+        if _codes:
+            with st.spinner("실시간 주가 수집 중..."):
+                price_map = fetch_watchlist_prices(_codes)
+
+    # 현재가·평가액 업데이트 (시트값 우선, 없으면 실시간 크롤링값 사용)
+    if price_map and not wl_df.empty:
+        def _apply_price(row):
+            code = str(row.get("종목코드","")).strip()
+            p    = price_map.get(code, (0, 0.0, 0.0))[0]
+            # 시트에 현재가가 입력되어 있으면 우선 사용
+            sheet_p = float(row.get("현재가", 0))
+            return sheet_p if sheet_p > 0 else p
+        wl_df["현재가_실시간"] = wl_df.apply(_apply_price, axis=1)
+        wl_df["전일대비(%)"]   = wl_df.apply(
+            lambda r: price_map.get(str(r.get("종목코드","")).strip(), (0,0.0,0.0))[1],
+            axis=1
+        )
+        wl_df["전일대비(원)"]  = wl_df.apply(
+            lambda r: price_map.get(str(r.get("종목코드","")).strip(), (0,0.0,0.0))[2],
+            axis=1
+        )
+        # 평가액 = 현재가 × 수량
+        wl_df["평가액_실시간"] = wl_df["현재가_실시간"] * wl_df.get("수량", 0).fillna(0)
+    else:
+        wl_df["현재가_실시간"] = wl_df.get("현재가", pd.Series([0]*len(wl_df))).fillna(0)
+        wl_df["전일대비(%)"]   = 0.0
+        wl_df["전일대비(원)"]  = 0.0
+        wl_df["평가액_실시간"] = wl_df["현재가_실시간"] * wl_df.get("수량", pd.Series([0]*len(wl_df))).fillna(0)
 
     # ── 시트 미연동 안내 ────────────────────────────────
     if wl_df.empty:
@@ -509,30 +598,59 @@ def _render_watchlist_tab(
         axis=1
     )
 
-    disp_cols = ["종목명","계좌","월분배율(%)","월분배금","세후분배금"]
-    if "목표가" in wl_df.columns: disp_cols.insert(2, "목표가")
-    if "메모" in wl_df.columns:   disp_cols.append("메모")
-    disp_wl = wl_df[[c for c in disp_cols if c in wl_df.columns]].copy()
+    # 테이블 컬럼 구성 — 현재가·전일대비·평가액 포함
+    disp_wl = wl_df.copy()
+    disp_wl["현재가"] = disp_wl["현재가_실시간"]
+    disp_wl["평가액"] = disp_wl["평가액_실시간"]
+
+    _show_cols = ["종목명","계좌"]
+    if "목표가" in disp_wl.columns:   _show_cols.append("목표가")
+    _show_cols += ["현재가","전일대비(%)","전일대비(원)"]
+    if "수량" in disp_wl.columns:     _show_cols.append("수량")
+    _show_cols += ["평가액","월분배율(%)","세후분배금"]
+    if "메모" in disp_wl.columns:     _show_cols.append("메모")
+
+    _disp = disp_wl[[c for c in _show_cols if c in disp_wl.columns]].copy()
+
+    # 갱신 버튼
+    _rcol1, _rcol2 = st.columns([6,1])
+    with _rcol2:
+        if st.button("🔄 주가갱신", key="wl_price_refresh"):
+            fetch_watchlist_prices.clear()
+            st.rerun()
+    with _rcol1:
+        if price_map:
+            st.caption(f"실시간 주가 반영 (캐시 3분) | {len(price_map)}종목")
+        else:
+            st.caption("시트에 종목코드 컬럼을 추가하면 실시간 주가가 연동됩니다.")
 
     st.dataframe(
-        disp_wl, hide_index=True, use_container_width=True,
+        _disp, hide_index=True, use_container_width=True,
         column_config={
-            "월분배율(%)":  st.column_config.NumberColumn(format="%.2f%%"),
-            "월분배금":     st.column_config.NumberColumn("월분배금(원)", format="%,.0f"),
+            "목표가":       st.column_config.NumberColumn("목표가(원)",   format="%,.0f"),
+            "현재가":       st.column_config.NumberColumn("현재가(원)",   format="%,.0f"),
+            "전일대비(%)":  st.column_config.NumberColumn("전일대비(%)", format="%+.2f%%"),
+            "전일대비(원)": st.column_config.NumberColumn("전일대비(원)", format="%+,.0f"),
+            "수량":         st.column_config.NumberColumn("수량(주)",     format="%,.0f"),
+            "평가액":       st.column_config.NumberColumn("평가액(원)",   format="%,.0f"),
+            "월분배율(%)":  st.column_config.NumberColumn("분배율(%)",   format="%.2f%%"),
             "세후분배금":   st.column_config.NumberColumn("세후분배금(원)", format="%,.0f"),
-            "목표가":       st.column_config.NumberColumn("목표가(원)", format="%,.0f"),
         },
     )
 
     # 계좌별 월분배금 합계 요약
-    acc_sum = wl_df.groupby("계좌")["세후분배금"].sum()
+    acc_sum      = wl_df.groupby("계좌")["세후분배금"].sum()
     total_wl_net = wl_df["세후분배금"].sum()
-    _cols = st.columns(len(acc_sum) + 1)
+    total_eval   = wl_df["평가액_실시간"].sum()
+
+    _sm_cols = st.columns(len(acc_sum) + 2)
     for i, (acc, val) in enumerate(acc_sum.items()):
-        _cols[i].metric(f"{acc} 세후합계", f"{val:,.0f}원")
-    _cols[-1].metric("전체 세후합계", f"{total_wl_net:,.0f}원",
-                     delta=f"목표 대비 {total_wl_net/target_monthly*100:.0f}%"
-                     if target_monthly > 0 else None)
+        _sm_cols[i].metric(f"{acc} 세후합계", f"{val:,.0f}원")
+    _sm_cols[-2].metric("전체 세후합계", f"{total_wl_net:,.0f}원",
+                        delta=f"목표 대비 {total_wl_net/target_monthly*100:.0f}%"
+                        if target_monthly > 0 else None)
+    _sm_cols[-1].metric("총 평가액", f"{total_eval:,.0f}원",
+                        help="현재가 × 수량 합계 (수량 입력 종목만)")
 
     # ══════════════════════════════════════════════════
     # 섹션 2: 시나리오 연계 분석
@@ -1227,12 +1345,15 @@ def load_watchlist(url: str, gid: str) -> pd.DataFrame:
         )
         if df.empty or "종목명" not in df.columns:
             return pd.DataFrame()
-        for col in ["목표가", "월분배율(%)", "수량", "주당분배금"]:
+        for col in ["목표가", "월분배율(%)", "수량", "주당분배금", "현재가", "평가액"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(
                     df[col].astype(str).str.replace(",", ""),
                     errors="coerce"
                 ).fillna(0)
+        # 종목코드 문자열 정리
+        if "종목코드" in df.columns:
+            df["종목코드"] = df["종목코드"].astype(str).str.strip()                                           .str.replace(".KS","").str.replace(".KQ","")
         return df
     except Exception:
         return pd.DataFrame()

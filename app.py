@@ -14,8 +14,10 @@ SHEET_URL      = "https://docs.google.com/spreadsheets/d/14e_0SQaBFbyEC-16hEEqvr
 WORKSHEET_NAME = "연금현황"
 DATA_TTL            = "5m"
 REQUIRED_ITEMS      = ["공적연금", "IRP", "ISA", "목표생활비"]  # 연금저축은 선택(없으면 0)
+SCENARIO_SHEET_GID  = ""   # ← 시나리오 탭 gid(숫자) 입력. 탭이 없으면 직접 작성 모드만 활성화
 SCENARIO_SHEET_GID  = "961920932"   # ← 시나리오 탭 gid(숫자) 입력. 탭이 없으면 직접 작성 모드만 활성화
 HOUSEHOLD_SHEET_GID = "122998571"   # ← 가계부 탭 gid(숫자) 입력
+WATCHLIST_SHEET_GID = "142238543"
 
 # ── 세금 상수 ─────────────────────────────────────────
 # 건강보험료: 지역가입자 기준 (건보 6.99% + 장기요양 0.9182% ≈ 7.09%)
@@ -386,6 +388,373 @@ actual_gid = "여기에_실적탭_gid"
     s3.metric("누적 잉여/부족", f"{actual_df['잉여/부족'].sum():+,.0f}원",
               delta_color="normal" if actual_df["잉여/부족"].sum() >= 0 else "inverse")
     s4.metric("월 평균 수입",   f"{actual_df['총수입'].mean():,.0f}원")
+
+
+# ──────────────────────────────────────────────────────
+# 관심종목 연금 특화 분석 데이터
+# ──────────────────────────────────────────────────────
+WATCHLIST_RESEARCH = {
+    "SOL팔란티어커버드콜OTM": {
+        "유형": "커버드콜 ETF", "기초자산": "팔란티어(PLTR)",
+        "분배주기": "월", "과세": "IRP 5.5%",
+        "특징": ["AI 방산 테마 노출", "커버드콜로 변동성 완화", "상승 캡 리스크 존재"],
+        "적합계좌": "IRP", "위험등급": "중간",
+    },
+    "TIGER미국배당다우존스": {
+        "유형": "배당 ETF", "기초자산": "다우존스 배당",
+        "분배주기": "월", "과세": "IRP 5.5%",
+        "특징": ["안정적 배당 기업 집중", "달러 분산 효과", "낮은 변동성"],
+        "적합계좌": "IRP/ISA", "위험등급": "낮음",
+    },
+    "ACE미국30년국채액티브": {
+        "유형": "채권 ETF", "기초자산": "미국 30년 국채",
+        "분배주기": "월", "과세": "ISA 비과세 한도",
+        "특징": ["금리 인하 수혜", "포트폴리오 방어 역할", "높은 듀레이션"],
+        "적합계좌": "ISA", "위험등급": "중간",
+    },
+    "KODEX200타겟위클리커버드콜": {
+        "유형": "커버드콜 ETF", "기초자산": "KOSPI 200",
+        "분배주기": "월(17일)", "과세": "ISA 비과세 한도",
+        "특징": ["코스피200 추종", "위클리 옵션 매도", "월배당 안정성"],
+        "적합계좌": "ISA", "위험등급": "낮음",
+    },
+}
+
+
+def _render_watchlist_tab(
+    wl_df: pd.DataFrame,
+    irp_total: float,
+    isa_total: float,
+    general_total: float,
+    ps_total: float,
+    public_pension: float,
+    target_monthly: float,
+    show_tax: bool,
+    sc_df: pd.DataFrame,
+    sc_names: list,
+):
+    """🔍 관심종목 탭 — 5개 섹션"""
+    st.markdown("#### 🔍 관심종목 연금 포트폴리오 분석")
+
+    # ── 시트 미연동 안내 ────────────────────────────────
+    if wl_df.empty:
+        st.info(
+            "**구글 시트에 `관심종목` 탭을 추가하고 아래 헤더로 구성하세요.**\\n\\n"
+            "```\\n종목명 | 계좌 | 목표가 | 월분배율(%) | 수량 | 주당분배금 | 분배주기 | 메모\\n```\\n\\n"
+            "| 종목명 | 계좌 | 목표가 | 월분배율(%) | 수량 | 주당분배금 | 분배주기 | 메모 |\\n"
+            "|---|---|---|---|---|---|---|---|\\n"
+            "| SOL팔란티어커버드콜OTM | IRP | 25000 | 2.08 | 20000 | 191 | 월 | 현 보유 |\\n"
+            "| TIGER미국배당다우존스 | IRP | 18000 | 1.50 | 0 | 0 | 월 | 교체 검토 |\\n"
+            "| ACE미국30년국채액티브 | ISA | 12000 | 0.80 | 0 | 0 | 월 | 방어용 |\\n\\n"
+            "탭 gid를 `WATCHLIST_SHEET_GID`에 입력하세요."
+        )
+        # 앱 직접 입력 모드 제공
+        st.divider()
+        st.markdown("**✏️ 임시 관심종목 직접 입력**")
+        st.caption("시트 연동 전 임시로 종목을 추가해서 분석해 보세요.")
+        _n = st.number_input("종목 수", 1, 5, 3, key="wl_n_temp")
+        temp_rows = []
+        for i in range(int(_n)):
+            c1, c2, c3, c4, c5 = st.columns([3,2,2,2,3])
+            nm   = c1.text_input(f"종목명{i+1}", key=f"wl_nm{i}", label_visibility="collapsed",
+                                  placeholder="종목명")
+            acc  = c2.selectbox("계좌", ["IRP","ISA","일반"], key=f"wl_acc{i}",
+                                 label_visibility="collapsed")
+            amt  = c3.number_input("원금(만원)", 0, value=0, step=100,
+                                    key=f"wl_amt{i}", label_visibility="collapsed")
+            rate = c4.number_input("분배율(%)", 0.0, 5.0, 0.0, 0.01,
+                                    key=f"wl_rate{i}", label_visibility="collapsed",
+                                    format="%.2f")
+            memo = c5.text_input("메모", key=f"wl_memo{i}", label_visibility="collapsed",
+                                  placeholder="메모")
+            if nm.strip():
+                temp_rows.append({
+                    "종목명": nm, "계좌": acc,
+                    "원금": amt * 10_000, "월분배율(%)": rate,
+                    "월분배금": amt * 10_000 * rate / 100,
+                    "메모": memo,
+                })
+        if temp_rows:
+            wl_df = pd.DataFrame(temp_rows)
+            wl_df["수량"] = 0
+            wl_df["주당분배금"] = 0
+            wl_df["목표가"] = 0
+            st.caption("임시 입력 데이터로 분석 중입니다.")
+        else:
+            return
+
+    # ══════════════════════════════════════════════════
+    # 섹션 1: 관심종목 현황 테이블
+    # ══════════════════════════════════════════════════
+    st.markdown("**① 관심종목 현황**")
+
+    # 월분배금 계산
+    if "원금" not in wl_df.columns:
+        wl_df["원금"] = wl_df.apply(
+            lambda r: r.get("수량", 0) * r.get("주당분배금", 0) / (r.get("월분배율(%)", 1) / 100)
+            if r.get("월분배율(%)", 0) > 0 else 0,
+            axis=1
+        )
+    if "월분배금" not in wl_df.columns:
+        wl_df["월분배금"] = wl_df.apply(
+            lambda r: (r.get("주당분배금", 0) * r.get("수량", 0))
+                      if r.get("수량", 0) > 0
+                      else (r.get("원금", 0) * r.get("월분배율(%)", 0) / 100),
+            axis=1
+        )
+    wl_df["세후분배금"] = wl_df.apply(
+        lambda r: r["월분배금"] * (1 - IRP_TAX_RATE)
+                  if r.get("계좌") in ["IRP","연금저축"]
+                  else r["월분배금"] * (1 - 0.099),
+        axis=1
+    )
+
+    disp_cols = ["종목명","계좌","월분배율(%)","월분배금","세후분배금"]
+    if "목표가" in wl_df.columns: disp_cols.insert(2, "목표가")
+    if "메모" in wl_df.columns:   disp_cols.append("메모")
+    disp_wl = wl_df[[c for c in disp_cols if c in wl_df.columns]].copy()
+
+    st.dataframe(
+        disp_wl, hide_index=True, use_container_width=True,
+        column_config={
+            "월분배율(%)":  st.column_config.NumberColumn(format="%.2f%%"),
+            "월분배금":     st.column_config.NumberColumn("월분배금(원)", format="%,.0f"),
+            "세후분배금":   st.column_config.NumberColumn("세후분배금(원)", format="%,.0f"),
+            "목표가":       st.column_config.NumberColumn("목표가(원)", format="%,.0f"),
+        },
+    )
+
+    # 계좌별 월분배금 합계 요약
+    acc_sum = wl_df.groupby("계좌")["세후분배금"].sum()
+    total_wl_net = wl_df["세후분배금"].sum()
+    _cols = st.columns(len(acc_sum) + 1)
+    for i, (acc, val) in enumerate(acc_sum.items()):
+        _cols[i].metric(f"{acc} 세후합계", f"{val:,.0f}원")
+    _cols[-1].metric("전체 세후합계", f"{total_wl_net:,.0f}원",
+                     delta=f"목표 대비 {total_wl_net/target_monthly*100:.0f}%"
+                     if target_monthly > 0 else None)
+
+    # ══════════════════════════════════════════════════
+    # 섹션 2: 시나리오 연계 분석
+    # ══════════════════════════════════════════════════
+    st.divider()
+    st.markdown("**② 시나리오 연계 — 편입 효과 분석**")
+    st.caption("관심종목을 현재 계좌에 편입하면 월 수령액이 어떻게 변하는지 계산합니다.")
+
+    sc2_cols = st.columns(3)
+    _acc_map = {"IRP": irp_total, "ISA": isa_total, "일반": general_total, "연금저축": ps_total}
+
+    for i, (_, row) in enumerate(wl_df.head(3).iterrows()):
+        acc_val = _acc_map.get(row.get("계좌","IRP"), irp_total)
+        _wl_monthly = float(row.get("월분배금", 0))
+        _tax_rate   = IRP_TAX_RATE if row.get("계좌") in ["IRP","연금저축"] else 0.099
+        _wl_net     = _wl_monthly * (1 - _tax_rate)
+        _total_est  = public_pension + _wl_net
+        _ach        = (_total_est / target_monthly * 100) if target_monthly > 0 else 0
+        _ach_color  = "#7dffb0" if _ach >= 100 else "#FFD700" if _ach >= 80 else "#FF4B4B"
+        with sc2_cols[i % 3]:
+            with st.container(border=True):
+                st.markdown(
+                    f"<div style='font-size:0.82rem; font-weight:700;'>"
+                    f"{str(row.get('종목명',''))[:16]}</div>"
+                    f"<div style='font-size:0.75rem; color:rgba(255,255,255,0.5);'>"
+                    f"{row.get('계좌','')} · {row.get('월분배율(%)',0):.2f}%</div>",
+                    unsafe_allow_html=True,
+                )
+                st.metric("월 세후 분배금", f"{_wl_net:,.0f}원")
+                st.metric(
+                    "연금+분배금 합계",
+                    f"{_total_est:,.0f}원",
+                    delta=f"달성률 {_ach:.0f}%",
+                    delta_color="normal" if _ach >= 100 else "inverse",
+                )
+                res_wl = WATCHLIST_RESEARCH.get(str(row.get("종목명","")).replace(" ",""))
+                if res_wl:
+                    st.caption(f"적합계좌: {res_wl['적합계좌']} | 위험: {res_wl['위험등급']}")
+
+    # ══════════════════════════════════════════════════
+    # 섹션 3: 종목 상세 분석
+    # ══════════════════════════════════════════════════
+    st.divider()
+    st.markdown("**③ 종목 상세 분석**")
+
+    sel_stock = st.selectbox(
+        "분석할 종목 선택",
+        wl_df["종목명"].tolist(),
+        key="wl_sel_stock",
+        label_visibility="collapsed",
+    )
+    sel_row = wl_df[wl_df["종목명"] == sel_stock].iloc[0]
+    res_data = WATCHLIST_RESEARCH.get(str(sel_stock).replace(" ", ""))
+
+    d1, d2 = st.columns(2)
+    with d1:
+        with st.container(border=True):
+            st.markdown("**📋 종목 특성**")
+            if res_data:
+                st.markdown(
+                    f"<div style='font-size:0.85rem; line-height:1.8;'>"
+                    f"유형: <b>{res_data['유형']}</b><br>"
+                    f"기초자산: <b>{res_data['기초자산']}</b><br>"
+                    f"분배주기: <b>{res_data['분배주기']}</b><br>"
+                    f"과세: <b>{res_data['과세']}</b><br>"
+                    f"추천계좌: <b style='color:#FFD700;'>{res_data['적합계좌']}</b><br>"
+                    f"위험등급: <b>{res_data['위험등급']}</b>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                st.divider()
+                st.markdown("**💡 주요 특징**")
+                for feat in res_data["특징"]:
+                    st.markdown(f"- {feat}")
+            else:
+                st.caption("등록된 분석 데이터가 없습니다.")
+                st.markdown(
+                    f"월분배율: **{sel_row.get('월분배율(%)',0):.2f}%**  |  "
+                    f"계좌: **{sel_row.get('계좌','')}**"
+                )
+
+    with d2:
+        with st.container(border=True):
+            st.markdown("**💰 연금 적합성 분석**")
+            _sel_acc    = sel_row.get("계좌", "IRP")
+            _sel_total  = _acc_map.get(_sel_acc, irp_total)
+            _sel_rate   = float(sel_row.get("월분배율(%)", 0)) / 100
+            _sel_gross  = _sel_total * _sel_rate
+            _sel_tax_r  = IRP_TAX_RATE if _sel_acc in ["IRP","연금저축"] else 0.099
+            _sel_net    = _sel_gross * (1 - _sel_tax_r)
+            _total_sim  = public_pension + _sel_net
+            _ach_sim    = (_total_sim / target_monthly * 100) if target_monthly > 0 else 0
+            _ach_c      = "#7dffb0" if _ach_sim >= 100 else "#FFD700" if _ach_sim >= 80 else "#FF4B4B"
+
+            st.markdown(
+                f"<div style='font-size:0.85rem; line-height:2.0;'>"
+                f"편입 계좌: <b>{_sel_acc}</b> "
+                f"(잔액 {_sel_total/100_000_000:.2f}억원)<br>"
+                f"세전 월분배금: <b>{_sel_gross:,.0f}원</b><br>"
+                f"세금: <b>-{_sel_gross*_sel_tax_r:,.0f}원</b> "
+                f"({_sel_tax_r*100:.1f}%)<br>"
+                f"세후 월분배금: <b style='color:#7dffb0;'>{_sel_net:,.0f}원</b><br>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            st.divider()
+            st.markdown(
+                f"<div style='text-align:center; padding:8px;'>"
+                f"<div style='font-size:0.78rem; color:rgba(255,255,255,0.5);'>"
+                f"공무원연금 + 이 종목만 편입 시</div>"
+                f"<div style='font-size:1.4rem; font-weight:700; "
+                f"color:{_ach_c};'>{_total_sim/10000:.0f}만원</div>"
+                f"<div style='font-size:0.9rem; color:{_ach_c};'>"
+                f"목표 달성률 {_ach_sim:.0f}%</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    # ══════════════════════════════════════════════════
+    # 섹션 4: 계좌별 교체 시뮬레이터
+    # ══════════════════════════════════════════════════
+    st.divider()
+    st.markdown("**④ 계좌별 교체 시뮬레이터**")
+    st.caption("현재 보유 종목과 관심종목을 교체했을 때 월 수령액 변화를 비교합니다.")
+
+    sim_c1, sim_c2, sim_c3 = st.columns(3)
+    with sim_c1:
+        sim_acc = st.selectbox("교체 계좌", ["IRP","ISA","일반"], key="sim_acc")
+    with sim_c2:
+        _current_rate = {
+            "IRP": irp_total * (irp_total and 1 or 0),
+            "ISA": isa_total,
+            "일반": general_total,
+        }.get(sim_acc, irp_total)
+        sim_curr_rate = st.number_input(
+            "현재 분배율(%)", 0.0, 5.0,
+            value=2.08 if sim_acc=="IRP" else 1.42,
+            step=0.01, key="sim_curr_rate", format="%.2f",
+        )
+    with sim_c3:
+        wl_for_acc = wl_df[wl_df["계좌"] == sim_acc]["종목명"].tolist()
+        sim_new = st.selectbox(
+            "교체 종목",
+            ["직접 입력"] + wl_for_acc,
+            key="sim_new_stock",
+        )
+
+    if sim_new == "직접 입력":
+        sim_new_rate = st.number_input(
+            "신규 분배율(%)", 0.0, 5.0, 1.5, 0.01, key="sim_new_rate", format="%.2f",
+        )
+    else:
+        _new_row     = wl_df[wl_df["종목명"] == sim_new].iloc[0]
+        sim_new_rate = float(_new_row.get("월분배율(%)", 0))
+
+    _acc_bal   = _acc_map.get(sim_acc, irp_total)
+    _tax_r_sim = IRP_TAX_RATE if sim_acc in ["IRP","연금저축"] else 0.099
+    _curr_net  = _acc_bal * (sim_curr_rate/100) * (1 - _tax_r_sim)
+    _new_net   = _acc_bal * (sim_new_rate /100) * (1 - _tax_r_sim)
+    _diff_net  = _new_net - _curr_net
+
+    r1, r2, r3 = st.columns(3)
+    r1.metric("현재 월 세후", f"{_curr_net:,.0f}원",
+              help=f"분배율 {sim_curr_rate:.2f}%")
+    r2.metric("교체 후 월 세후", f"{_new_net:,.0f}원",
+              delta=f"{_diff_net:+,.0f}원",
+              delta_color="normal" if _diff_net >= 0 else "inverse",
+              help=f"분배율 {sim_new_rate:.2f}%")
+    _ach_curr = ((public_pension + _curr_net) / target_monthly * 100) if target_monthly > 0 else 0
+    _ach_new  = ((public_pension + _new_net)  / target_monthly * 100) if target_monthly > 0 else 0
+    r3.metric("달성률 변화",
+              f"{_ach_new:.0f}%",
+              delta=f"{_ach_new - _ach_curr:+.1f}%p",
+              delta_color="normal" if _ach_new >= _ach_curr else "inverse")
+
+    # ══════════════════════════════════════════════════
+    # 섹션 5: 월분배금 캘린더 미리보기
+    # ══════════════════════════════════════════════════
+    st.divider()
+    st.markdown("**⑤ 관심종목 편입 시 월별 분배금 예상**")
+
+    monthly_wl = {m: 0.0 for m in range(1, 13)}
+    for _, row in wl_df.iterrows():
+        _dist = str(row.get("분배주기", "월"))
+        _mo   = float(row.get("월분배금", 0))
+        _tax  = IRP_TAX_RATE if row.get("계좌") in ["IRP","연금저축"] else 0.099
+        _net  = _mo * (1 - _tax)
+        if "월" in _dist:
+            for m in range(1, 13):
+                monthly_wl[m] += _net
+        elif "분기" in _dist:
+            for m in [3, 6, 9, 12]:
+                monthly_wl[m] += _net * 3
+        elif "반기" in _dist:
+            for m in [6, 12]:
+                monthly_wl[m] += _net * 6
+
+    vals = [monthly_wl[m] for m in range(1, 13)]
+    _max_val = max(vals) if max(vals) > 0 else 1
+    fig_wl = go.Figure(go.Bar(
+        x=[f"{m}월" for m in range(1, 13)],
+        y=vals,
+        marker_color=["#FFD700" if v == _max_val and v > 0
+                      else "rgba(135,206,235,0.3)" for v in vals],
+        text=[f"{v/10000:.1f}만" if v > 0 else "" for v in vals],
+        textposition="outside",
+    ))
+    fig_wl.add_hline(
+        y=target_monthly / 10000,
+        line_dash="dot", line_color="rgba(255,75,75,0.5)", line_width=1.5,
+        annotation_text=f"목표 {target_monthly/10000:.0f}만원",
+        annotation_font_color="rgba(255,75,75,0.8)",
+    )
+    fig_wl.update_layout(
+        height=280, paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(255,255,255,0.02)", font_color="white",
+        margin=dict(t=20, b=20, l=10, r=10),
+        yaxis=dict(title="세후 분배금 (만원)", tickformat=","),
+    )
+    st.plotly_chart(fig_wl, use_container_width=True)
+    st.caption("* 관심종목의 분배금만 표시 (공무원연금 제외) | 월배당 기준 계산")
+
 
 def calc_target_expense(
     age: int,
@@ -840,6 +1209,35 @@ def load_household(url: str, gid: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+
+@st.cache_data(ttl=DATA_TTL, show_spinner=False)
+def load_watchlist(url: str, gid: str) -> pd.DataFrame:
+    """
+    구글 시트 '관심종목' 탭 로드.
+    헤더: 종목명|계좌|목표가|월분배율(%)|수량|주당분배금|분배주기|메모
+    """
+    if not gid or not str(gid).strip().isdigit():
+        return pd.DataFrame()
+    try:
+        import re as _re
+        sid = _re.search(r"/d/([a-zA-Z0-9_-]+)", url).group(1)
+        df  = pd.read_csv(
+            f"https://docs.google.com/spreadsheets/d/{sid}"
+            f"/export?format=csv&gid={gid}"
+        )
+        if df.empty or "종목명" not in df.columns:
+            return pd.DataFrame()
+        for col in ["목표가", "월분배율(%)", "수량", "주당분배금"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(
+                    df[col].astype(str).str.replace(",", ""),
+                    errors="coerce"
+                ).fillna(0)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
 @st.cache_data(ttl=DATA_TTL, show_spinner=False)
 def load_and_validate(url: str, gid: str) -> tuple[pd.DataFrame, list[str]]:
     """시트 로드 + 유효성 검사 결과를 캐시해 반환"""
@@ -944,6 +1342,10 @@ with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as
         hh_df = load_household(SHEET_URL, HOUSEHOLD_SHEET_GID)
     except Exception:
         hh_df = pd.DataFrame()
+    try:
+        wl_df = load_watchlist(SHEET_URL, WATCHLIST_SHEET_GID)
+    except Exception:
+        wl_df = pd.DataFrame()
 
     st.write("✨ 준비 완료...")
     _cache_info = (
@@ -1349,6 +1751,7 @@ with st.sidebar:
         load_and_validate.clear()
         load_scenarios.clear()
         load_household.clear()
+        load_watchlist.clear()
         st.session_state.pop("_data_loaded", None)
         st.rerun()
     st.caption(f"워크시트: {WORKSHEET_NAME} · 캐시: {DATA_TTL}")
@@ -1434,11 +1837,22 @@ if sc_choice != "기본 (시트 연금현황)" and sc_names:
     )
 
 # ── 메인 탭 ──────────────────────────────────────────
-_main_tab1, _main_tab2 = st.tabs(["📊 현금흐름 대시보드", "📒 월별 가계부"])
+_main_tab1, _main_tab2, _main_tab3 = st.tabs(["📊 현금흐름 대시보드", "📒 월별 가계부", "🔍 관심종목"])
 
 with _main_tab2:
     _render_household_tab(hh_df, display_income, target_monthly, public_pension,
                           irp_income, isa_income, now_kst=datetime.now())
+
+with _main_tab3:
+    _render_watchlist_tab(
+        wl_df=wl_df,
+        irp_total=irp_total, isa_total=isa_total,
+        general_total=general_total, ps_total=ps_total,
+        public_pension=public_pension,
+        target_monthly=target_monthly,
+        show_tax=show_tax,
+        sc_df=sc_df, sc_names=sc_names,
+    )
 
 with _main_tab1:
     tax_label = "세후 " if show_tax else "세전 "

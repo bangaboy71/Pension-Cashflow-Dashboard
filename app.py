@@ -1530,8 +1530,39 @@ def load_scenarios(url: str, gid: str) -> pd.DataFrame:
             f"https://docs.google.com/spreadsheets/d/{sid}"
             f"/export?format=csv&gid={gid}"
         )
-        if df.empty or "시나리오명" not in df.columns:
+        if df.empty:
             return pd.DataFrame()
+
+        # ── 컬럼명 자동 매핑 ────────────────────────────────
+        # 현재 시트 형식(관심종목 분석 형식)도 지원
+        rename_map = {}
+
+        # 시나리오명 없으면 기본값 "현재안" 삽입
+        if "시나리오명" not in df.columns:
+            df.insert(0, "시나리오명", "현재안")
+
+        # 월분배율(%) → 분배율(%) 매핑
+        if "분배율(%)" not in df.columns and "월분배율(%)" in df.columns:
+            rename_map["월분배율(%)"] = "분배율(%)"
+
+        # 평가액 → 원금 매핑 (원금 컬럼 없을 때)
+        if "원금" not in df.columns:
+            if "평가액" in df.columns:
+                rename_map["평가액"] = "원금"
+            elif "수량" in df.columns and "현재가" in df.columns:
+                # 수량 × 현재가로 원금 계산
+                df["원금"] = (
+                    pd.to_numeric(df["수량"].astype(str).str.replace(",",""), errors="coerce").fillna(0)
+                    * pd.to_numeric(df["현재가"].astype(str).str.replace(",",""), errors="coerce").fillna(0)
+                )
+
+        if rename_map:
+            df = df.rename(columns=rename_map)
+
+        # 필수 컬럼 최종 확인
+        if "시나리오명" not in df.columns or "계좌" not in df.columns:
+            return pd.DataFrame()
+
         # 숫자 변환
         for col in ["원금", "분배율(%)"]:
             if col in df.columns:
@@ -1539,6 +1570,13 @@ def load_scenarios(url: str, gid: str) -> pd.DataFrame:
                     df[col].astype(str).str.replace(",", ""),
                     errors="coerce"
                 ).fillna(0)
+
+        # 기본적용 컬럼 정규화 (Y/y/1/True → True)
+        if "기본적용" in df.columns:
+            df["기본적용"] = df["기본적용"].astype(str).str.strip().str.upper()                               .isin(["Y", "YES", "1", "TRUE", "예", "O"])
+        else:
+            df["기본적용"] = False
+
         return df
     except Exception:
         return pd.DataFrame()
@@ -1547,11 +1585,10 @@ def load_scenarios(url: str, gid: str) -> pd.DataFrame:
 def build_scenario_params(sc_df: pd.DataFrame, sc_name: str) -> dict:
     """
     시나리오명으로 필터링 → 계좌별 원금 합산 및 가중평균 분배율 계산.
-    반환: {
-      "irp_total": float, "isa_total": float, "gen_total": float,
-      "irp_rate":  float, "isa_rate":  float, "gen_rate":  float,
-      "irp_종목":  list[dict], "isa_종목": list[dict], "gen_종목": list[dict],
-    }
+
+    관심종목 구조(수량·주당분배금·평가액) 지원:
+      월분배금 = 수량×주당분배금  >  평가액×분배율(%)  순 우선
+      가중평균분배율 = 월분배금합계 / 원금합계 × 100
     """
     sub = sc_df[sc_df["시나리오명"] == sc_name].copy()
     result = {
@@ -1567,10 +1604,23 @@ def build_scenario_params(sc_df: pd.DataFrame, sc_name: str) -> dict:
         total = rows["원금"].sum()
         if total <= 0:
             continue
-        # 가중평균 분배율
-        w_rate = (rows["원금"] * rows["분배율(%)"]).sum() / total
+        # 종목별 월분배금 계산 (수량×주당분배금 우선)
+        def _monthly(r):
+            qty  = float(r.get("수량",      0) or 0)
+            dps  = float(r.get("주당분배금", 0) or 0)
+            amt  = float(r.get("원금",      0) or 0)
+            rate = float(r.get("분배율(%)", 0) or 0)
+            if qty > 0 and dps > 0:
+                return qty * dps
+            elif amt > 0 and rate > 0:
+                return amt * rate / 100
+            return 0.0
+        rows = rows.copy()
+        rows["_월분배금"] = rows.apply(_monthly, axis=1)
+        total_monthly     = rows["_월분배금"].sum()
+        w_rate            = (total_monthly / total * 100) if total > 0 else 0.0
         result[f"{acc_en}_total"] = total
-        result[f"{acc_en}_rate"]  = w_rate / 100   # % → 소수
+        result[f"{acc_en}_rate"]  = w_rate / 100
         result[f"{acc_en}_종목"]  = rows[["종목명","원금","분배율(%)"]].to_dict("records")
     return result
 
@@ -1741,9 +1791,16 @@ with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as
     try:
         sc_df    = load_scenarios(SHEET_URL, SCENARIO_SHEET_GID)
         sc_names = sc_df["시나리오명"].unique().tolist() if not sc_df.empty else []
+        # 기본적용=Y 시나리오 자동 감지
+        if not sc_df.empty and "기본적용" in sc_df.columns:
+            _default_sc_rows = sc_df[sc_df["기본적용"] == True]["시나리오명"].unique()
+            sc_default_name  = _default_sc_rows[0] if len(_default_sc_rows) > 0 else ""
+        else:
+            sc_default_name = ""
     except Exception:
-        sc_df    = pd.DataFrame()
-        sc_names = []
+        sc_df           = pd.DataFrame()
+        sc_names        = []
+        sc_default_name = ""
 
     # STEP 5 — 가계부 로드
     st.write("📒 가계부 데이터 로드 중...")
@@ -1752,7 +1809,8 @@ with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as
     except Exception:
         hh_df = pd.DataFrame()
     try:
-        wl_df = load_watchlist(SHEET_URL, WATCHLIST_SHEET_GID)
+        _wl_gid = WATCHLIST_SHEET_GID or SCENARIO_SHEET_GID
+        wl_df = load_watchlist(SHEET_URL, _wl_gid)
     except Exception:
         wl_df = pd.DataFrame()
 
@@ -2033,30 +2091,47 @@ with st.sidebar:
     if _sc_mode == "📋 시트 시나리오 선택":
         # ── 시트 저장 시나리오 선택 ──────────────────────
         if sc_names:
+            # 기본적용 시나리오 자동 선택 (최초 1회)
+            _sc_opts     = ["기본 (시트 연금현황)"] + sc_names
+            _sc_def_idx  = 0
+            if sc_default_name and sc_default_name in sc_names:
+                _sc_def_idx = _sc_opts.index(sc_default_name)
+
             sc_choice = st.selectbox(
                 "시나리오 선택",
-                ["기본 (시트 연금현황)"] + sc_names,
+                _sc_opts,
+                index=_sc_def_idx,
                 key="sc_choice",
-                help="구글 시트 '시나리오' 탭에서 정의한 포트폴리오 구성",
+                help="구글 시트 '시나리오' 탭에서 기본적용=Y로 설정하면 자동 선택됩니다.",
             )
+            # 기본 적용 배지 표시
+            if sc_default_name and sc_choice == sc_default_name:
+                st.caption(f"✅ 기본 시나리오 자동 적용 중")
+            elif sc_default_name:
+                st.caption(f"📌 기본: {sc_default_name}")
             if sc_choice != "기본 (시트 연금현황)":
                 _sc_params = build_scenario_params(sc_df, sc_choice)
-                st.caption(
-                    f"IRP {_sc_params['irp_total']/100_000_000:.2f}억 "
-                    f"({_sc_params['irp_rate']*100:.2f}%) / "
-                    f"ISA {_sc_params['isa_total']/10_000_000:.1f}천만 "
-                    f"({_sc_params['isa_rate']*100:.2f}%)"
-                )
+                # 계좌별 요약
+                _sc_sum = []
+                for acc_kr, acc_en in [("IRP","irp"),("ISA","isa"),("일반","gen")]:
+                    _t = _sc_params[f"{acc_en}_total"]
+                    _r = _sc_params[f"{acc_en}_rate"] * 100
+                    if _t > 0:
+                        _sc_sum.append(f"{acc_kr} {_t/100_000_000:.2f}억({_r:.2f}%)")
+                st.caption(" / ".join(_sc_sum) if _sc_sum else "구성 없음")
+
                 with st.expander("구성 종목 보기"):
                     for acc_kr, acc_en in [("IRP","irp"),("ISA","isa"),("일반","gen")]:
                         items = _sc_params[f"{acc_en}_종목"]
                         if items:
                             st.markdown(f"**{acc_kr}**")
                             for it in items:
+                                _원금 = float(it.get("원금", 0))
+                                _분배율 = float(it.get("분배율(%)", 0))
                                 st.caption(
-                                    f"  {it['종목명']} — "
-                                    f"{it['원금']/10_000_000:.1f}천만원 / "
-                                    f"{it['분배율(%)']:.2f}%"
+                                    f"  {it.get('종목명','')} — "
+                                    f"{_원금/10_000_000:.1f}천만원 / "
+                                    f"{_분배율:.2f}%"
                                 )
         else:
             sc_choice = "기본 (시트 연금현황)"

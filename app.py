@@ -2143,7 +2143,7 @@ with st.sidebar:
     st.divider()
     st.subheader("⚙️ 세금 옵션")
     show_tax       = st.toggle("세후 실수령액 표시",  value=True)
-    use_health_ins = st.toggle("건강보험료 포함",     value=True)
+    use_health_ins = False  # 건강보험료는 생활비에 포함 → 세후 계산에서 제외
 
     # ── 시나리오 선택 ─────────────────────────────────
     st.divider()

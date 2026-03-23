@@ -35,10 +35,19 @@ PS_TAX_RATE            = 0.055   # 연금저축 (pension saving)
 # 연금수령 한도(연차별 계산) 이내: 퇴직소득세 × 60% 감면
 # 연금수령 한도 초과: 퇴직소득세 100% (감면 없음)
 # ※ 아래 세율은 2026년 기준 실효세율 (개인 퇴직소득 과세표준 기반)
-IRP_PENSION_LIMIT_ANNUAL = 20_900_000   # 2026년 연금수령 한도 (원) — 매년 갱신 필요
+# ── 연금수령한도 공식 (소득세법 시행령 §40의2) ─────────
+# 연간 한도 = 평가액 ÷ (11 - 수령연차) × 120%  연차: 개시=1, 매년+1
 IRP_PENSION_TAX_WITHIN   = 0.0076      # 한도 내 실효세율 (퇴직소득세 × 60% 감면)
 IRP_PENSION_TAX_EXCESS   = 0.011       # 한도 초과 실효세율 (퇴직소득세 100%)
-# ※ 연금저축은 별도 세율(5.5%) 유지 — 퇴직금 아닌 개인 납입금
+IRP_PENSION_COMPREHENSIVE_LIMIT = 15_000_000  # 연 1,500만원 초과 시 종합과세 위험
+# ── IRP 개인납입금·운용수익 원천 연금소득세 (소득세법 §129 ①5호) ─
+# 나이별 세율: ~69세 5.5% / 70~79세 4.4% / 80세~ 3.3%
+IRP_PENSION_PERSONAL_TAX = {  # 나이 → 세율(지방세 포함)
+    "60s": 0.055,   # 55~69세
+    "70s": 0.044,   # 70~79세
+    "80s": 0.033,   # 80세 이상
+}
+# ※ 연금저축은 동일 연금소득세율 적용 (퇴직금 아닌 개인 납입금)
 
 
 
@@ -1287,7 +1296,11 @@ def calc_after_tax(
     public_pension: float,
     irp_income: float,
     isa_income: float,
-    ps_income: float = 0.0,   # 연금저축 (pension saving)
+    ps_income: float = 0.0,
+    irp_total: float = 0.0,
+    irp_pension_year: int = 1,
+    irp_personal_ratio: float = 0.0,   # 개인납입금+운용수익 비율 (0~1)
+    age: int = 55,                      # 수령 시점 나이 (연금소득세율 결정)
 ) -> dict:
     """
     세목별 공제 후 실수령액 계산 (소득세법 정확 적용).
@@ -1297,10 +1310,11 @@ def calc_after_tax(
     ─ 지방소득세 10% 가산
     ─ 건강보험료: 연금소득 × 7.09% (지역가입자, 장기요양 포함)
 
-    IRP / 퇴직연금 (퇴직금 원천)
-    ─ 연금수령 한도(연 20,900,000원) 이내: 퇴직소득세 × 60% 감면 (실효 0.76%)
-    ─ 연금수령 한도 초과분: 퇴직소득세 100% (실효 1.1%)
-    ─ 근거: 소득세법 시행령 §40의2
+    IRP (퇴직금 + 개인납입금·운용수익 복합)
+    ─ 퇴직금 원천: 한도 내 0.76%, 한도 초과 1.1% (퇴직소득세 감면)
+    ─ 개인납입금+운용수익 원천: 나이별 연금소득세 5.5%(~69세)/4.4%(70대)/3.3%(80대~)
+    ─ 연 1,500만원(개인납입금+운용수익 기준) 초과 시 종합과세 위험
+    ─ 근거: 소득세법 §129 ①5호, 시행령 §40의2
 
     연금저축
     ─ 연금소득세 분리과세 5.5% (IRP와 동일, 소득세법 §129 ①5호)
@@ -1325,13 +1339,37 @@ def calc_after_tax(
     pub_health   = public_pension * HEALTH_INS_RATE
     pub_net      = public_pension - pub_tax - pub_health
 
-    # ── IRP (퇴직연금 연금수령 — 한도 내/초과 구분 과세) ──
-    _irp_limit_monthly = IRP_PENSION_LIMIT_ANNUAL / 12
-    _irp_within  = min(irp_income, _irp_limit_monthly)
-    _irp_excess  = max(0.0, irp_income - _irp_limit_monthly)
-    irp_tax      = (_irp_within * IRP_PENSION_TAX_WITHIN
+    # ── IRP (퇴직금 + 개인납입금 원천별 분리 과세) ────────
+    _irp_yr       = max(1, min(irp_pension_year, 10))
+    _irp_limit_annual  = (irp_total / (11 - _irp_yr) * 1.2
+                          if irp_total > 0 else 20_900_000)
+    _irp_limit_monthly = _irp_limit_annual / 12
+
+    # 원천별 월 수령액 분리
+    _personal_ratio  = max(0.0, min(1.0, irp_personal_ratio))
+    _irp_personal    = irp_income * _personal_ratio        # 개인납입금+운용수익 원천
+    _irp_retirement  = irp_income * (1 - _personal_ratio)  # 퇴직금 원천
+
+    # 퇴직금 원천: 한도 내/초과 구분
+    _irp_within  = min(_irp_retirement, _irp_limit_monthly)
+    _irp_excess  = max(0.0, _irp_retirement - _irp_limit_monthly)
+    _irp_ret_tax = (_irp_within * IRP_PENSION_TAX_WITHIN
                     + _irp_excess * IRP_PENSION_TAX_EXCESS)
-    irp_net      = irp_income - irp_tax
+
+    # 개인납입금+운용수익 원천: 나이별 연금소득세
+    if age >= 80:
+        _personal_tax_rate = IRP_PENSION_PERSONAL_TAX["80s"]
+    elif age >= 70:
+        _personal_tax_rate = IRP_PENSION_PERSONAL_TAX["70s"]
+    else:
+        _personal_tax_rate = IRP_PENSION_PERSONAL_TAX["60s"]
+    _irp_personal_tax = _irp_personal * _personal_tax_rate
+
+    irp_tax = _irp_ret_tax + _irp_personal_tax
+    irp_net = irp_income - irp_tax
+
+    # 종합과세 기준: 개인납입금+운용수익 연간 수령액
+    _irp_personal_annual = _irp_personal * 12
 
     # ── 연금저축 ──
     ps_tax  = ps_income * PS_TAX_RATE
@@ -1354,6 +1392,13 @@ def calc_after_tax(
         "IRP_세전":        irp_income,
         "IRP_세금":        irp_tax,
         "IRP_세후":        irp_net,
+        "IRP_한도월":      _irp_limit_monthly,
+        "IRP_한도연":      _irp_limit_annual,
+        "IRP_한도초과":    _irp_excess,
+        "IRP_개인납입연":  _irp_personal_annual,
+        "IRP_개인세율":    _personal_tax_rate,
+        "IRP_퇴직세":      _irp_ret_tax,
+        "IRP_개인세":      _irp_personal_tax,
         "연금저축_세전":   ps_income,
         "연금저축_세금":   ps_tax,
         "연금저축_세후":   ps_net,
@@ -2336,7 +2381,16 @@ ps_income    = float(ps_income_input) if ps_total > 0 else 0.0
 total_income = public_pension + irp_income + ps_income + isa_income
 
 # 세후 계산
-tax_result = calc_after_tax(public_pension, irp_income, isa_income, ps_income)
+_irp_pension_yr    = int(st.session_state.get("irp_pension_year", 1))
+_irp_personal_r    = float(st.session_state.get("irp_personal_ratio", 0.20))
+_current_age       = current_year - birth_year
+tax_result = calc_after_tax(
+    public_pension, irp_income, isa_income, ps_income,
+    irp_total=irp_total,
+    irp_pension_year=_irp_pension_yr,
+    irp_personal_ratio=_irp_personal_r,
+    age=_current_age,
+)
 if not use_health_ins:
     tax_result["공적연금_세후"]  += tax_result["공적연금_건보료"]
     tax_result["총_세후"]        += tax_result["공적연금_건보료"]
@@ -2870,6 +2924,37 @@ with _main_tab1:
                 f"실수령 {tax_result['IRP_세후']:,.0f}원</div>",
                 unsafe_allow_html=True
             )
+            # 한도 정보 표시
+            _irp_lm = tax_result.get("IRP_한도월", 0)
+            _irp_ex = tax_result.get("IRP_한도초과", 0)
+            if _irp_lm > 0:
+                _lm_color = "#FF4B4B" if _irp_ex > 0 else "rgba(255,255,255,0.4)"
+                st.markdown(
+                    f"<div style='font-size:0.72rem; color:{_lm_color}; margin-top:2px;'>"
+                    f"{'⚠️ 한도초과 ' + f'{_irp_ex:,.0f}원/월 → 1.1% 적용' if _irp_ex > 0 else '✅ 한도 내 수령 (0.76%)'}"
+                    f" | 월한도 {_irp_lm:,.0f}원</div>",
+                    unsafe_allow_html=True,
+                )
+            # 원천별 세금 상세 캡션
+            _pers_annual = tax_result.get("IRP_개인납입연", 0)
+            _pers_rate   = tax_result.get("IRP_개인세율", 0.055)
+            _ret_tax     = tax_result.get("IRP_퇴직세", 0)
+            _pers_tax    = tax_result.get("IRP_개인세", 0)
+            if _pers_annual > 0 or _ret_tax > 0:
+                st.markdown(
+                    f"<div style='font-size:0.72rem; color:rgba(255,255,255,0.45); margin-top:2px;'>"
+                    f"퇴직금분 {_ret_tax:,.0f}원 | "
+                    f"개인납입분 {_pers_tax:,.0f}원 ({_pers_rate*100:.1f}%)</div>",
+                    unsafe_allow_html=True,
+                )
+            # 연간 1,500만원 종합과세 경고 — 개인납입+운용수익 원천 기준
+            if _pers_annual > IRP_PENSION_COMPREHENSIVE_LIMIT:
+                st.warning(
+                    f"⚠️ **종합과세 주의** — 개인납입금·운용수익 원천 연간 수령액 "
+                    f"{_pers_annual/10000:.0f}만원이 1,500만원 초과. "
+                    f"종합과세 또는 분리과세(16.5%) 중 선택 필요.",
+                    icon="⚠️"
+                )
 
         # 연금저축 카드 (잔액이 있을 때만 표시)
         if ps_total > 0:
@@ -3041,9 +3126,26 @@ with _main_tab1:
             min_value=0.0, max_value=5.0, value=2.0, step=0.1,
             help="공적연금 물가 연동 및 목표생활비 실질 계산에 적용",
         ) / 100
+        irp_pension_year_input = st.number_input(
+            "IRP 연금수령 연차",
+            min_value=1, max_value=10, value=1, step=1,
+            key="irp_pension_year",
+            help="수령 개시연도=1차, 매년+1. 한도=잔액÷(11-연차)×120%",
+        )
+        irp_personal_ratio = st.slider(
+            "IRP 개인납입금 비율 (%)",
+            min_value=0, max_value=100, value=20, step=5,
+            key="irp_personal_ratio",
+            help="IRP 잔액 중 개인납입금(세액공제분)+운용수익 비율. "
+                 "나머지는 퇴직금 원천. 연금소득세율 5.5% 적용 부분.",
+        ) / 100
+        # 연금수령한도 실시간 표시
+        _limit_preview = irp_total / (11 - int(irp_pension_year_input)) * 1.2
         st.caption(
             f"출생 {birth_year}년 · 은퇴 {retire_age}세 · "
-            f"공무원연금 {pension_age}세 개시 · 기대수명 {life_exp}세"
+            f"공무원연금 {pension_age}세 개시 · 기대수명 {life_exp}세\n"
+            f"IRP {irp_pension_year_input}차 연금수령한도: {_limit_preview/10000:.0f}만원/년 "
+            f"({_limit_preview/12/10000:.0f}만원/월) | 개인납입 {irp_personal_ratio*100:.0f}%"
         )
 
         st.divider()

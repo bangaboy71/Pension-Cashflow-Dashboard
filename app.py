@@ -2383,7 +2383,7 @@ total_income = public_pension + irp_income + ps_income + isa_income
 # 세후 계산
 _irp_pension_yr    = int(st.session_state.get("irp_pension_year", 1))
 _irp_personal_r    = float(st.session_state.get("irp_personal_ratio", 0.20))
-_current_age       = current_year - birth_year
+_current_age       = datetime.now().year - birth_year
 tax_result = calc_after_tax(
     public_pension, irp_income, isa_income, ps_income,
     irp_total=irp_total,

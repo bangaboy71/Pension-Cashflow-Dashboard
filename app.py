@@ -2491,16 +2491,13 @@ with st.sidebar:
         min_value=0, max_value=_isa_max,
         value=min(_isa_w_def, _isa_max), step=100_000, key="isa_withdraw",
     )
-    if ps_total > 0:
-        _ps_w_def = int(_shortfall * 0.05 / 10000) * 10000
-        _ps_max   = max(int(ps_total * 0.10), 100_000)
-        ps_withdraw = st.number_input(
-            "🏦 연금저축 월 인출액 (원)",
-            min_value=0, max_value=_ps_max,
-            value=min(_ps_w_def, _ps_max), step=100_000, key="ps_withdraw",
-        )
-    else:
-        ps_withdraw = 0
+    _ps_w_def = int(_shortfall * 0.05 / 10000) * 10000
+    _ps_max   = max(int(ps_total * 0.10) if ps_total > 0 else 100_000, 100_000)
+    ps_withdraw = st.number_input(
+        "🏦 연금저축 월 인출액 (원)",
+        min_value=0, max_value=_ps_max,
+        value=min(_ps_w_def, _ps_max), step=100_000, key="ps_withdraw",
+    )
     gen_withdraw = st.number_input(
         "💵 일반 월 인출액 (원)",
         min_value=0, max_value=_gen_max,
@@ -2633,11 +2630,12 @@ if sc_choice != "기본 (시트 연금현황)" and not sc_df.empty:
     if _sc["isa_rate"] > 0:
         kodex_rate       = _sc["isa_rate"]
         isa_income_input = int(isa_total * kodex_rate)
-    if _sc.get("ps_rate", 0) > 0:
-        ps_rate          = _sc["ps_rate"]
-        ps_income_input  = int(ps_total * ps_rate)
+    # 연금저축: ps_total 먼저 교체 후 ps_income_input 계산
     if _sc.get("ps_total", 0) > 0:
-        ps_total         = _sc["ps_total"]
+        ps_total = _sc["ps_total"]
+    if _sc.get("ps_rate", 0) > 0:
+        ps_rate         = _sc["ps_rate"]
+        ps_income_input = int(ps_total * ps_rate)
     _sc_applied = True
     # 종목명 추출 — _sc 딕셔너리 우선, 없으면 sc_df 직접 파싱
     def _extract_names(acc_kr):
@@ -2661,7 +2659,39 @@ if sc_choice != "기본 (시트 연금현황)" and not sc_df.empty:
 irp_income   = float(irp_income_input)
 isa_income   = float(isa_income_input)
 ps_income    = float(ps_income_input) if ps_total > 0 else 0.0
-total_income = public_pension + irp_income + ps_income + isa_income
+# 일반 계좌 월 분배금 — 종목별 수량×DPS 합산 우선
+def _calc_gen_monthly(items, total, annual_rate_pct):
+    """일반 계좌 월 분배금 계산: 수량×DPS 합산 → 없으면 원금×분배율 → 없으면 연분배율÷12"""
+    total_m = 0.0
+    has_dps = False
+    for it in items:
+        qty  = float(it.get("수량", 0) or 0)
+        dps  = float(it.get("주당분배금", 0) or 0)
+        amt  = float(it.get("원금", 0) or 0)
+        rate = float(it.get("분배율(%)", 0) or 0)
+        nm   = str(it.get("종목명", ""))
+        if "(원금)" in nm:   # 빈 행 더미 항목 제외
+            continue
+        if qty > 0 and dps > 0:
+            total_m += qty * dps
+            has_dps = True
+        elif amt > 0 and rate > 0:
+            total_m += amt * rate / 100
+            has_dps = True
+    if not has_dps and total > 0:
+        total_m = total * (annual_rate_pct / 100 / 12)
+    return total_m
+
+# 시나리오 또는 연금현황 일반 종목 데이터 선택
+_gen_items_for_calc = (
+    _sc.get("gen_종목", []) if _sc_applied and "_sc" in dir() and _sc.get("gen_종목")
+    else _pension_gen_items
+)
+_gen_annual_rate_pct = _vals.get("default_general", 2.88)
+_gen_monthly_income  = _calc_gen_monthly(
+    _gen_items_for_calc, general_total, _gen_annual_rate_pct
+)
+total_income = public_pension + irp_income + ps_income + isa_income + _gen_monthly_income
 
 # 세후 계산
 _irp_pension_yr    = int(st.session_state.get("irp_pension_year", 1))
@@ -3079,8 +3109,7 @@ with _main_tab1:
 
         # 실제 수령액 (세전 기준)
         # general_rate_hm = 연분배율/100/12 (월 환산율)
-        _gen_rate_now    = float(st.session_state.get("general_rate_hm", 2.88/100/12))
-        _gen_actual      = general_total * _gen_rate_now   # 월 평균 수령액
+        _gen_actual      = _gen_monthly_income   # 시나리오/연금현황 수량×DPS 기반
 
         _withdrawal_card_v2(
             w1, "💼 IRP", "#FFD700",
@@ -3282,8 +3311,7 @@ with _main_tab1:
 
         # 일반 계좌 카드 (잔액 있을 때만)
         if general_total > 0:
-            _gen_rate_now = float(st.session_state.get("general_rate_hm", 2.88/100/12))
-            _gen_inc  = general_total * _gen_rate_now   # 월 평균 (연분배금÷12)
+            _gen_inc  = _gen_monthly_income   # 시나리오/연금현황 수량×DPS 기반
             _gen_tax  = _gen_inc * 0.154
             _gen_net  = _gen_inc - _gen_tax
             with st.container(border=True):
@@ -3325,8 +3353,7 @@ with _main_tab1:
         st.markdown("#### 📊 세전 vs 세후 비교")
 
         # 세전·세후 비교 막대차트
-        _gen_rate_bar = float(st.session_state.get("general_rate_hm", 2.88/100/12))
-        _gen_inc_bar  = general_total * _gen_rate_bar
+        _gen_inc_bar  = _gen_monthly_income   # 시나리오/연금현황 수량×DPS 기반
         _gen_net_bar  = _gen_inc_bar * (1 - 0.154)
         _bar_구분 = ["공적연금","IRP"] + (["ISA"]) + (["일반"] if general_total>0 else [])
         _bar_세전 = [tax_result["공적연금_세전"], tax_result["IRP_세전"],

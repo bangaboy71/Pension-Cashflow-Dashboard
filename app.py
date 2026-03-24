@@ -630,6 +630,7 @@ def _render_holdings_tab(
     irp_total: float,
     isa_total: float,
     gen_total: float,
+    ps_total: float = 0.0,
 ):
     """📈 보유종목 탭 — 연금계좌 실시간 현황"""
     import plotly.graph_objects as go
@@ -860,7 +861,7 @@ def _render_holdings_tab(
         _code    = _normalize_code(str(_row.get("종목코드","")))
         res_data = _match_watchlist_research(_sel_nm)
         _acc_kr  = str(_row.get("계좌","IRP"))
-        _acc_tot = {"IRP": irp_total,"ISA": isa_total,"일반": gen_total}.get(_acc_kr, 0)
+        _acc_tot = {"IRP": irp_total,"ISA": isa_total,"일반": gen_total,"연금저축": ps_total}.get(_acc_kr, 0)
         _tax_r   = IRP_TAX_RATE if _acc_kr in ["IRP","연금저축"] else 0.099
         _qty     = float(_row.get("수량", 0))
         _dps     = float(_row.get("주당분배금", 0))
@@ -2267,6 +2268,7 @@ with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as
     _pension_irp_items = _vals.get("irp_종목", [])
     _pension_isa_items = _vals.get("isa_종목", [])
     _pension_gen_items = _vals.get("gen_종목", [])
+    _pension_ps_items  = _vals.get("ps_종목",  [])
 
     # STEP 5 — 시나리오 탭 로드 (실패해도 앱 중단 없음)
     st.write("🎯 시나리오 데이터 로드 중...")
@@ -2680,12 +2682,14 @@ with _main_tab2:
 with _main_tab3:
     _render_holdings_tab(
         pension_items={
-            "IRP":  _pension_irp_items,
-            "ISA":  _pension_isa_items,
-            "일반": _pension_gen_items,
+            "IRP":    _pension_irp_items,
+            "ISA":    _pension_isa_items,
+            "일반":   _pension_gen_items,
+            "연금저축": _pension_ps_items,
         },
         sc_df=sc_df, sc_choice=sc_choice, wl_df=wl_df,
         irp_total=irp_total, isa_total=isa_total, gen_total=general_total,
+        ps_total=ps_total,
     )
 
 with _main_tab4:

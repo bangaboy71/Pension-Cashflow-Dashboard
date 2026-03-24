@@ -2519,26 +2519,28 @@ with st.sidebar:
             # 구성 종목 표출 — 기본(연금현황) 포함 항상 표시
             if sc_choice == "기본 (시트 연금현황)":
                 _disp_items = {
-                    "IRP": _pension_irp_items,
-                    "ISA": _pension_isa_items,
-                    "일반": _pension_gen_items,
+                    "IRP":    _pension_irp_items,
+                    "ISA":    _pension_isa_items,
+                    "일반":   _pension_gen_items,
+                    "연금저축": _pension_ps_items,
                 }
                 _disp_source = "연금현황 시트"
             else:
                 _sc_params = build_scenario_params(sc_df, sc_choice)
                 _disp_items = {
-                    acc_kr: _sc_params[f"{acc_en}_종목"]
-                    for acc_kr, acc_en in [("IRP","irp"),("ISA","isa"),("일반","gen")]
+                    acc_kr: _sc_params.get(f"{acc_en}_종목", [])
+                    for acc_kr, acc_en in [("IRP","irp"),("ISA","isa"),("일반","gen"),("연금저축","ps")]
                 }
                 _disp_source = sc_choice
 
             # 계좌별 요약 캡션
             _sc_sum = []
-            for acc_kr, acc_en in [("IRP","irp"),("ISA","isa"),("일반","gen")]:
+            for acc_kr, acc_en in [("IRP","irp"),("ISA","isa"),("일반","gen"),("연금저축","ps")]:
                 if sc_choice == "기본 (시트 연금현황)":
-                    _t = {"IRP": irp_total, "ISA": isa_total, "일반": general_total}.get(acc_kr, 0)
+                    _t = {"IRP": irp_total, "ISA": isa_total, "일반": general_total,
+                          "연금저축": ps_total}.get(acc_kr, 0)
                     _r = {"IRP": default_palantir, "ISA": default_kodex,
-                          "일반": default_general/12}.get(acc_kr, 0)
+                          "일반": default_general/12, "연금저축": default_ps}.get(acc_kr, 0)
                 else:
                     _t = _sc_params.get(f"{acc_en}_total", 0)
                     _r = _sc_params.get(f"{acc_en}_rate", 0) * 100

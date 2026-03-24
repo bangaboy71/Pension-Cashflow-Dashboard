@@ -2542,6 +2542,17 @@ with _main_tab2:
     _render_household_tab(hh_df, display_income, target_monthly, public_pension,
                           irp_income, isa_income, now_kst=datetime.now())
 
+with _main_tab3:
+    _render_holdings_tab(
+        pension_items={
+            "IRP":  _pension_irp_items,
+            "ISA":  _pension_isa_items,
+            "일반": _pension_gen_items,
+        },
+        sc_df=sc_df, sc_choice=sc_choice, wl_df=wl_df,
+        irp_total=irp_total, isa_total=isa_total, gen_total=general_total,
+    )
+
 with _main_tab4:
     _render_watchlist_tab(
         wl_df=wl_df,

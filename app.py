@@ -623,7 +623,7 @@ def _match_watchlist_research(name: str) -> dict | None:
 
 
 def _render_holdings_tab(
-    pension_items: dict,       # {"IRP": [...], "ISA": [...], "일반": [...]}
+    pension_items: dict,
     sc_df: pd.DataFrame,
     sc_choice: str,
     wl_df: pd.DataFrame,
@@ -631,12 +631,9 @@ def _render_holdings_tab(
     isa_total: float,
     gen_total: float,
 ):
-    """📈 보유종목 탭 — 연금계좌 보유종목 모니터링"""
+    """📈 보유종목 탭 — 연금계좌 실시간 현황"""
     import plotly.graph_objects as go
     import plotly.express as px
-
-    st.markdown("#### 📈 보유종목 현황")
-    st.caption("연금현황 시트에 입력된 실제 보유종목 기준으로 자동 집계됩니다.")
 
     # ── 데이터 준비 ──────────────────────────────────────
     all_items = []
@@ -652,233 +649,323 @@ def _render_holdings_tab(
                 continue
             monthly = qty * dps if qty > 0 and dps > 0 else amt * rate / 100
             all_items.append({
-                "계좌":     acc_kr,
-                "종목명":   nm,
-                "종목코드": code,
-                "수량":     int(qty),
-                "주당분배금": int(dps),
-                "평가원금":  amt,
-                "분배율(%)": rate,
-                "월분배금":  monthly,
-                "연분배금":  monthly * 12,
+                "계좌": acc_kr, "종목명": nm, "종목코드": code,
+                "수량": int(qty), "주당분배금": int(dps),
+                "매입금액": amt, "분배율(%)": rate, "월분배금": monthly,
             })
 
     if not all_items:
-        st.info("연금현황 시트에 보유종목을 입력하면 여기에 표시됩니다.\n"
-                "헤더: 계좌 | 종목명 | 종목코드 | 수량 | 주당분배금 | 원금 | 분배율(%)")
+        st.info("연금현황 시트에 보유종목을 입력하면 여기에 표시됩니다.")
         return
 
     port_df = pd.DataFrame(all_items)
 
-    # ── 요약 카드 ────────────────────────────────────────
-    _total_amt     = port_df["평가원금"].sum()
-    _total_monthly = port_df["월분배금"].sum()
-    _total_annual  = _total_monthly * 12
-    _avg_rate      = (_total_monthly / _total_amt * 100) if _total_amt > 0 else 0
-    _n_stocks      = len(port_df)
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("총 투자원금",    f"{_total_amt/100_000_000:.2f}억원")
-    m2.metric("월 예상 분배금", f"{_total_monthly:,.0f}원")
-    m3.metric("연 예상 분배금", f"{_total_annual:,.0f}원")
-    m4.metric("평균 월 분배율", f"{_avg_rate:.2f}%",
-              help="총 월분배금 / 총 투자원금")
-
-    st.divider()
-
     # ── 실시간 주가 조회 ─────────────────────────────────
-    st.markdown("**📋 보유종목 현황**")
-    codes = [r["종목코드"] for r in all_items if r["종목코드"]]
+    codes = [r["종목코드"] for r in all_items if r["종목코드"] and r["종목코드"] not in ("nan","0","")]
     prices_map = {}
+    prev_map   = {}
     if codes:
         with st.spinner("실시간 주가 조회 중..."):
-            for code in codes:
+            for code in set(codes):
                 try:
-                    import yfinance as yf
-                    _ticker = code if "." in code else code + ".KS"
-                    _tk = yf.Ticker(_ticker)
-                    _hist = _tk.history(period="2d")
-                    if not _hist.empty:
-                        prices_map[code] = float(_hist["Close"].iloc[-1])
+                    price, prev = get_stock_price(code)
+                    if price > 0:
+                        prices_map[code] = price
+                        prev_map[code]   = prev
                 except Exception:
                     pass
 
-    # 주가 반영
+    # 주가 반영 → 평가금액·손익 계산
     rows = []
     for it in all_items:
-        code  = it["종목코드"]
-        price = prices_map.get(code, 0)
-        qty   = it["수량"]
-        amt   = it["평가원금"]
+        code     = it["종목코드"]
+        price    = prices_map.get(code, 0)
+        prev     = prev_map.get(code, 0)
+        qty      = it["수량"]
+        amt      = it["매입금액"]
         eval_amt = qty * price if qty > 0 and price > 0 else amt
         gain     = eval_amt - amt if price > 0 and qty > 0 else 0
         gain_pct = (gain / amt * 100) if amt > 0 else 0
+        day_diff = (price - prev) * qty if price > 0 and prev > 0 and qty > 0 else 0
+        day_pct  = ((price / prev - 1) * 100) if prev > 0 and price > 0 else 0
         rows.append({
             **it,
-            "현재가":   int(price) if price > 0 else "-",
-            "평가금액": int(eval_amt),
-            "평가손익": int(gain),
-            "수익률(%)": round(gain_pct, 2),
+            "매입단가":   int(amt / qty) if qty > 0 else 0,
+            "현재가":     int(price) if price > 0 else 0,
+            "평가금액":   int(eval_amt),
+            "손익":       int(gain),
+            "전일대비(원)": int(day_diff),
+            "전일대비(%)": round(day_pct, 2),
+            "누적수익률(%)": round(gain_pct, 2),
         })
     disp_df = pd.DataFrame(rows)
 
-    st.dataframe(
-        disp_df[[
-            "계좌","종목명","수량","주당분배금","현재가",
-            "평가원금","평가금액","평가손익","수익률(%)",
-            "월분배금","연분배금","분배율(%)"
-        ]],
-        hide_index=True, use_container_width=True,
-        column_config={
-            "수량":       st.column_config.NumberColumn(format="%,d"),
-            "주당분배금": st.column_config.NumberColumn(format="%,d"),
-            "현재가":     st.column_config.NumberColumn(format="%,d"),
-            "평가원금":   st.column_config.NumberColumn(format="%,d"),
-            "평가금액":   st.column_config.NumberColumn(format="%,d"),
-            "평가손익":   st.column_config.NumberColumn(format="%+,d"),
-            "수익률(%)":  st.column_config.NumberColumn(format="%+.2f%%"),
-            "월분배금":   st.column_config.NumberColumn(format="%,d"),
-            "연분배금":   st.column_config.NumberColumn(format="%,d"),
-            "분배율(%)":  st.column_config.NumberColumn(format="%.2f%%"),
-        },
-    )
+    # ══════════════════════════════════════════════════════
+    # 1. 계좌별 요약 카드 (상단)
+    # ══════════════════════════════════════════════════════
+    _total_eval = disp_df["평가금액"].sum()
+    _total_buy  = disp_df["매입금액"].sum()
+    _total_gain = disp_df["손익"].sum()
+    _total_ret  = (_total_gain / _total_buy * 100) if _total_buy > 0 else 0
+    _total_day  = disp_df["전일대비(원)"].sum()
+    _total_day_pct = (_total_day / (_total_eval - _total_day) * 100) if (_total_eval - _total_day) > 0 else 0
 
+    c1, c2, c3, c4 = st.columns(4)
+    _ret_c = "#7dffb0" if _total_ret >= 0 else "#FF4B4B"
+    _day_c = "#7dffb0" if _total_day >= 0 else "#FF4B4B"
+
+    c1.metric("계좌 평가액", f"{_total_eval:,.0f}원",
+              delta=f"{_total_day:+,.0f}원 ({_total_day_pct:+.2f}%)",
+              delta_color="normal" if _total_day >= 0 else "inverse")
+    c2.metric("계좌 매입액", f"{_total_buy:,.0f}원")
+    c3.metric("계좌 손익",   f"{_total_gain:+,.0f}원",
+              delta_color="normal" if _total_gain >= 0 else "inverse")
+    c4.metric("계좌 수익률", f"{_total_ret:+.2f}%",
+              delta_color="normal" if _total_ret >= 0 else "inverse")
+
+    # ══════════════════════════════════════════════════════
+    # 2. 보유종목 테이블
+    # ══════════════════════════════════════════════════════
     st.divider()
 
-    # ── 계좌별 구성 차트 ─────────────────────────────────
+    tbl_cols = ["종목명","수량","매입단가","매입금액","현재가",
+                "평가금액","손익","전일대비(원)","전일대비(%)","누적수익률(%)"]
+    _tbl_event = st.dataframe(
+        disp_df[tbl_cols],
+        hide_index=True, use_container_width=True,
+        on_select="rerun", selection_mode="single-row",
+        column_config={
+            "수량":          st.column_config.NumberColumn(format="%,d"),
+            "매입단가":      st.column_config.NumberColumn(format="%,d"),
+            "매입금액":      st.column_config.NumberColumn(format="%,d"),
+            "현재가":        st.column_config.NumberColumn(format="%,d"),
+            "평가금액":      st.column_config.NumberColumn(format="%,d"),
+            "손익":          st.column_config.NumberColumn(format="%+,d"),
+            "전일대비(원)":  st.column_config.NumberColumn(format="%+,d"),
+            "전일대비(%)":   st.column_config.NumberColumn(format="%+.2f%%"),
+            "누적수익률(%)": st.column_config.NumberColumn(format="%+.2f%%"),
+        },
+        key="holdings_tbl",
+    )
+    _sel_rows = _tbl_event.selection.rows if hasattr(_tbl_event, "selection") else []
+    _sel_idx  = _sel_rows[0] if _sel_rows else 0
+    _sel_nm   = disp_df["종목명"].iloc[_sel_idx] if len(disp_df) > 0 else ""
+
+    # ══════════════════════════════════════════════════════
+    # 3. 분배금 요약 카드
+    # ══════════════════════════════════════════════════════
+    st.divider()
+    _total_monthly = port_df["월분배금"].sum()
+    _avg_rate      = (_total_monthly / _total_buy * 100) if _total_buy > 0 else 0
+
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("총 투자원금",    f"{_total_buy/100_000_000:.2f}억원")
+    d2.metric("월 예상 분배금", f"{_total_monthly:,.0f}원")
+    d3.metric("연 예상 분배금", f"{_total_monthly*12:,.0f}원")
+    d4.metric("평균 월 분배율", f"{_avg_rate:.2f}%")
+
+    # ══════════════════════════════════════════════════════
+    # 4. 차트
+    # ══════════════════════════════════════════════════════
+    st.divider()
     ch1, ch2 = st.columns(2)
     with ch1:
         st.markdown("**계좌별 원금 배분**")
-        acc_grp = port_df.groupby("계좌")["평가원금"].sum().reset_index()
+        acc_grp = port_df.groupby("계좌")["매입금액"].sum().reset_index()
         fig_pie = px.pie(
-            acc_grp, values="평가원금", names="계좌", hole=0.4,
+            acc_grp, values="매입금액", names="계좌", hole=0.4,
             color_discrete_sequence=["#FFD700","#FF4B4B","#87CEEB","#5DCAA5"],
         )
         fig_pie.update_layout(
-            height=260, paper_bgcolor="rgba(0,0,0,0)",
+            height=240, paper_bgcolor="rgba(0,0,0,0)",
             font_color="white", margin=dict(t=10,b=0,l=0,r=0),
         )
         st.plotly_chart(fig_pie, use_container_width=True)
 
     with ch2:
         st.markdown("**종목별 월 분배금**")
-        dist_grp = port_df.sort_values("월분배금", ascending=True).tail(8)
+        dist_s = port_df.sort_values("월분배금", ascending=True)
         fig_bar = go.Figure(go.Bar(
-            x=dist_grp["월분배금"] / 10000,
-            y=dist_grp["종목명"].str[:10],
+            x=dist_s["월분배금"] / 10000,
+            y=dist_s["종목명"].str[:12],
             orientation="h",
             marker_color="#FFD700",
-            text=[f"{v/10000:.1f}만" for v in dist_grp["월분배금"]],
+            text=[f"{v/10000:.1f}만" for v in dist_s["월분배금"]],
             textposition="outside",
         ))
         fig_bar.update_layout(
-            height=260, paper_bgcolor="rgba(0,0,0,0)",
+            height=240, paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(255,255,255,0.02)",
             font_color="white", margin=dict(t=10,b=10,l=10,r=60),
-            xaxis=dict(title="만원"),
         )
         st.plotly_chart(fig_bar, use_container_width=True)
 
+    # ══════════════════════════════════════════════════════
+    # 5. 종목 상세 분석 (관심종목 상세 동일 구조)
+    # ══════════════════════════════════════════════════════
     st.divider()
+    st.markdown(f"**🔍 종목 상세 — {_sel_nm}**")
+    st.caption("위 테이블에서 행을 선택하면 해당 종목 상세 정보가 표시됩니다.")
 
-    # ── 종목 상세 분석 ───────────────────────────────────
-    st.markdown("**🔍 종목 상세**")
-    _sel = st.selectbox(
-        "종목 선택",
-        port_df["종목명"].tolist(),
-        key="holdings_sel",
-        label_visibility="collapsed",
-    )
-    _sel_row = port_df[port_df["종목명"] == _sel].iloc[0]
-    _sel_code = _sel_row["종목코드"]
+    if _sel_nm and len(disp_df) > 0:
+        _row     = disp_df[disp_df["종목명"] == _sel_nm].iloc[0]
+        _code    = _normalize_code(str(_row.get("종목코드","")))
+        res_data = _match_watchlist_research(_sel_nm)
+        _acc_kr  = str(_row.get("계좌","IRP"))
+        _acc_tot = {"IRP": irp_total,"ISA": isa_total,"일반": gen_total}.get(_acc_kr, 0)
+        _tax_r   = IRP_TAX_RATE if _acc_kr in ["IRP","연금저축"] else 0.099
+        _qty     = float(_row.get("수량", 0))
+        _dps     = float(_row.get("주당분배금", 0))
+        _rate    = float(_row.get("분배율(%)", 0))
+        _monthly_gross = _qty * _dps if _qty > 0 and _dps > 0 else _acc_tot * _rate / 100
+        _monthly_net   = _monthly_gross * (1 - _tax_r)
 
-    d1, d2, d3, d4 = st.columns(4)
-    d1.metric("계좌",     _sel_row["계좌"])
-    d2.metric("보유 수량", f"{int(_sel_row['수량']):,}주")
-    d3.metric("월 분배금", f"{_sel_row['월분배금']:,.0f}원")
-    d4.metric("연 분배금", f"{_sel_row['연분배금']:,.0f}원")
+        e1, e2 = st.columns(2)
+        with e1:
+            with st.container(border=True):
+                st.markdown("**📋 종목 특성**")
+                if res_data:
+                    st.markdown(
+                        f"<div style='font-size:0.85rem; line-height:1.8;'>"
+                        f"유형: <b>{res_data['유형']}</b><br>"
+                        f"기초자산: <b>{res_data['기초자산']}</b><br>"
+                        f"분배주기: <b>{res_data['분배주기']}</b><br>"
+                        f"과세: <b>{res_data['과세']}</b><br>"
+                        f"추천계좌: <b style='color:#FFD700;'>{res_data['적합계좌']}</b><br>"
+                        f"위험등급: <b>{res_data['위험등급']}</b>"
+                        f"</div>", unsafe_allow_html=True,
+                    )
+                    st.divider()
+                    st.markdown("**💡 주요 특징**")
+                    for feat in res_data.get("특징",[]):
+                        st.markdown(f"- {feat}")
+                else:
+                    st.caption("등록된 분석 데이터가 없습니다.")
+                    st.markdown(
+                        f"계좌: **{_acc_kr}**  |  "
+                        f"분배율: **{_rate:.2f}%**  |  "
+                        f"주당분배금: **{int(_dps):,}원**"
+                    )
 
-    # 주가 차트 (코드 있을 때)
-    if _sel_code:
-        with st.spinner(f"{_sel} 주가 조회 중..."):
-            try:
-                import yfinance as yf
-                _ticker = _sel_code if "." in _sel_code else _sel_code + ".KS"
-                _tk   = yf.Ticker(_ticker)
-                _hist = _tk.history(period="6mo")
-                if not _hist.empty:
+        with e2:
+            with st.container(border=True):
+                st.markdown("**💰 수익 분석**")
+                st.markdown(
+                    f"<div style='font-size:0.85rem; line-height:2.0;'>"
+                    f"계좌: <b>{_acc_kr}</b> (잔액 {_acc_tot/100_000_000:.2f}억원)<br>"
+                    f"보유수량: <b>{int(_qty):,}주</b>  ×  "
+                    f"주당분배금: <b>{int(_dps):,}원</b><br>"
+                    f"월 세전 분배금: <b>{_monthly_gross:,.0f}원</b><br>"
+                    f"세금(-{_tax_r*100:.1f}%): <b>-{_monthly_gross*_tax_r:,.0f}원</b><br>"
+                    f"월 세후 분배금: <b style='color:#7dffb0;'>{_monthly_net:,.0f}원</b><br>"
+                    f"연 세후 분배금: <b style='color:#7dffb0;'>{_monthly_net*12:,.0f}원</b>"
+                    f"</div>", unsafe_allow_html=True,
+                )
+                # 현재 보유 손익
+                _eval = int(_row.get("평가금액", 0))
+                _buy  = int(_row.get("매입금액", 0))
+                _gain = int(_row.get("손익", 0))
+                _ret  = float(_row.get("누적수익률(%)", 0))
+                _gc   = "#7dffb0" if _gain >= 0 else "#FF4B4B"
+                st.divider()
+                st.markdown(
+                    f"<div style='font-size:0.85rem; line-height:1.8;'>"
+                    f"매입금액: <b>{_buy:,.0f}원</b><br>"
+                    f"평가금액: <b>{_eval:,.0f}원</b><br>"
+                    f"평가손익: <b style='color:{_gc};'>{_gain:+,.0f}원 "
+                    f"({_ret:+.2f}%)</b>"
+                    f"</div>", unsafe_allow_html=True,
+                )
+
+        # ── 주가 추이 차트 ──────────────────────────────
+        if _code and _code not in ("","nan","0"):
+            with st.container(border=True):
+                _chart_cols = st.columns([4,1])
+                with _chart_cols[1]:
                     _period = st.radio(
                         "기간", ["1개월","3개월","6개월"],
-                        index=2, horizontal=True, key="holdings_period",
+                        index=1, key="hld_chart_period", horizontal=False,
                     )
-                    _days = {"1개월":21,"3개월":63,"6개월":126}[_period]
-                    _h = _hist.tail(_days)
-                    fig_line = go.Figure()
-                    fig_line.add_trace(go.Scatter(
-                        x=_h.index, y=_h["Close"],
-                        fill="tozeroy",
-                        fillcolor="rgba(255,215,0,0.08)",
-                        line=dict(color="#FFD700", width=1.5),
-                        name=_sel[:10],
-                    ))
-                    # 주당분배금 기준선
-                    if _sel_row["주당분배금"] > 0 and _sel_row["분배율(%)"] > 0:
-                        _target_price = _sel_row["주당분배금"] / (_sel_row["분배율(%)"] / 100 / 12)
-                        fig_line.add_hline(
-                            y=_target_price,
-                            line=dict(color="#7dffb0", dash="dot", width=1),
-                            annotation_text=f"목표 {_target_price:,.0f}원",
-                            annotation_position="right",
-                        )
-                    fig_line.update_layout(
-                        height=220, paper_bgcolor="rgba(0,0,0,0)",
-                        plot_bgcolor="rgba(255,255,255,0.02)",
-                        font_color="white",
-                        margin=dict(t=10,b=30,l=10,r=80),
-                        yaxis=dict(tickformat=","),
-                    )
-                    st.plotly_chart(fig_line, use_container_width=True)
-            except Exception:
-                st.caption(f"주가 조회 실패 — 종목코드를 확인하세요: {_sel_code}")
+                _pages_map = {"1개월":2,"3개월":5,"6개월":13}
+                hist_df = fetch_price_history(_code, pages=_pages_map.get(_period,5))
 
-    # ── 관심종목 탭 연동 — 편입 비교 ────────────────────
-    if not wl_df.empty and "종목명" in wl_df.columns:
-        st.divider()
-        st.markdown("**💡 관심종목과 비교**")
-        _wl_names = wl_df["종목명"].tolist()
-        _wl_sel   = st.multiselect(
-            "비교 관심종목 선택", _wl_names, key="holdings_wl_cmp",
-            label_visibility="collapsed",
-        )
-        if _wl_sel:
-            cmp_rows = []
-            for nm in [_sel] + _wl_sel:
-                _r = port_df[port_df["종목명"]==nm]
-                if not _r.empty:
-                    cmp_rows.append({
-                        "종목명": nm, "구분": "보유",
-                        "월분배금": _r.iloc[0]["월분배금"],
-                        "분배율(%)": _r.iloc[0]["분배율(%)"],
-                    })
-                else:
-                    _wr = wl_df[wl_df["종목명"]==nm]
-                    if not _wr.empty:
-                        _wamt = float(_wr.iloc[0].get("평가액",0) or
-                                      _sel_row["평가원금"])
-                        _wrate = float(_wr.iloc[0].get("월분배율(%)",0) or 0)
-                        cmp_rows.append({
-                            "종목명": nm, "구분": "관심",
-                            "월분배금": _wamt * _wrate / 100,
-                            "분배율(%)": _wrate,
-                        })
-            if cmp_rows:
-                cmp_df = pd.DataFrame(cmp_rows)
-                st.dataframe(cmp_df, hide_index=True, use_container_width=True,
-                    column_config={
-                        "월분배금":   st.column_config.NumberColumn(format="%,d"),
-                        "분배율(%)":  st.column_config.NumberColumn(format="%.2f%%"),
-                    }
-                )
+                with _chart_cols[0]:
+                    if hist_df.empty:
+                        st.caption(f"주가 데이터 조회 실패 — 종목코드: {_code}")
+                    else:
+                        _curr_p = int(_row.get("현재가", 0))
+                        _tgt_p  = 0
+                        # 관심종목 탭에 목표가 있으면 가져오기
+                        if not wl_df.empty and "목표가" in wl_df.columns:
+                            _wl_r = wl_df[wl_df["종목명"]==_sel_nm]
+                            if not _wl_r.empty:
+                                _tgt_p = float(_wl_r.iloc[0].get("목표가",0) or 0)
+
+                        _last_p  = hist_df["종가"].iloc[-1]
+                        _first_p = hist_df["종가"].iloc[0]
+                        _chg_pct = (_last_p/_first_p-1)*100 if _first_p>0 else 0
+                        _lc      = "#7dffb0" if _chg_pct>=0 else "#FF4B4B"
+
+                        fig_h = go.Figure()
+                        fig_h.add_trace(go.Scatter(
+                            x=hist_df["날짜"], y=hist_df["종가"],
+                            mode="lines", name="종가",
+                            line=dict(color=_lc, width=2),
+                            fill="tozeroy",
+                            fillcolor=f"rgba({','.join(str(int(_lc[i:i+2],16)) for i in [1,3,5])},0.08)",
+                        ))
+                        if _tgt_p > 0:
+                            fig_h.add_hline(
+                                y=_tgt_p, line_dash="dot",
+                                line_color="#FFD700", line_width=1.5,
+                                annotation_text=f"목표 {_tgt_p:,.0f}원",
+                                annotation_position="top right",
+                                annotation_font_color="#FFD700",
+                            )
+                        if _curr_p > 0 and _curr_p != int(_last_p):
+                            fig_h.add_hline(
+                                y=_curr_p, line_dash="dash",
+                                line_color="rgba(255,255,255,0.4)", line_width=1,
+                                annotation_text=f"현재 {_curr_p:,.0f}원",
+                                annotation_position="bottom right",
+                                annotation_font_color="rgba(255,255,255,0.5)",
+                            )
+                        _y_min = hist_df["저가"].min() if "저가" in hist_df.columns else hist_df["종가"].min()
+                        _y_max = hist_df["고가"].max() if "고가" in hist_df.columns else hist_df["종가"].max()
+                        if _tgt_p > 0:
+                            _y_min = min(_y_min, _tgt_p)
+                            _y_max = max(_y_max, _tgt_p)
+                        _pad = max((_y_max-_y_min)*0.08, _y_max*0.005)
+
+                        fig_h.update_layout(
+                            title=dict(
+                                text=f"{_sel_nm[:20]}  "
+                                     f"<span style='font-size:0.9rem; color:{_lc};'>"
+                                     f"{_chg_pct:+.1f}% ({_period})</span>",
+                                font_size=14,
+                            ),
+                            height=280,
+                            paper_bgcolor="rgba(0,0,0,0)",
+                            plot_bgcolor="rgba(255,255,255,0.02)",
+                            font_color="white",
+                            margin=dict(t=40,b=30,l=10,r=90),
+                            yaxis=dict(
+                                range=[max(0,_y_min-_pad), _y_max+_pad],
+                                tickformat=",",
+                            ),
+                            xaxis=dict(showgrid=False),
+                        )
+                        st.plotly_chart(fig_h, use_container_width=True)
+
+                        # 시작가·현재가·고가·저가
+                        p1,p2,p3,p4 = st.columns(4)
+                        p1.metric("시작가", f"{int(_first_p):,}원")
+                        p2.metric("현재가", f"{int(_last_p):,}원",
+                                  delta=f"{_chg_pct:+.1f}%",
+                                  delta_color="normal" if _chg_pct>=0 else "inverse")
+                        if "고가" in hist_df.columns:
+                            p3.metric("고가", f"{int(hist_df['고가'].max()):,}원")
+                            p4.metric("저가", f"{int(hist_df['저가'].min()):,}원")
 
 
 def _render_watchlist_tab(

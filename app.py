@@ -660,43 +660,45 @@ def _render_holdings_tab(
 
     port_df = pd.DataFrame(all_items)
 
-    # ── 실시간 주가 조회 ─────────────────────────────────
-    codes = [r["종목코드"] for r in all_items if r["종목코드"] and r["종목코드"] not in ("nan","0","")]
-    prices_map = {}
-    prev_map   = {}
-    if codes:
-        with st.spinner("실시간 주가 조회 중..."):
-            for code in set(codes):
-                try:
-                    price, prev = get_stock_price(code)
-                    if price > 0:
-                        prices_map[code] = price
-                        prev_map[code]   = prev
-                except Exception:
-                    pass
+    # ── 실시간 주가 조회 (fetch_watchlist_prices 재사용) ─
+    codes = [_normalize_code(r["종목코드"])
+             for r in all_items
+             if r["종목코드"] and r["종목코드"] not in ("nan","0","")]
+    codes = [c for c in codes if c]
+    prices_raw = fetch_watchlist_prices(tuple(set(codes))) if codes else {}
+    # prices_raw: {코드: (현재가, 전일대비%, 전일대비금액)}
+    prices_map = {k: v[0] for k, v in prices_raw.items()}
+    prev_pct_map = {k: v[1] for k, v in prices_raw.items()}
+    prev_amt_map = {k: v[2] for k, v in prices_raw.items()}
 
     # 주가 반영 → 평가금액·손익 계산
     rows = []
     for it in all_items:
-        code     = it["종목코드"]
+        raw_code = it["종목코드"]
+        code     = _normalize_code(raw_code)
         price    = prices_map.get(code, 0)
-        prev     = prev_map.get(code, 0)
+        day_pct  = prev_pct_map.get(code, 0.0)
+        day_amt  = prev_amt_map.get(code, 0)
         qty      = it["수량"]
+        dps      = it["주당분배금"]
         amt      = it["매입금액"]
+        rate     = it["분배율(%)"]
+        monthly  = it["월분배금"]
         eval_amt = qty * price if qty > 0 and price > 0 else amt
         gain     = eval_amt - amt if price > 0 and qty > 0 else 0
         gain_pct = (gain / amt * 100) if amt > 0 else 0
-        day_diff = (price - prev) * qty if price > 0 and prev > 0 and qty > 0 else 0
-        day_pct  = ((price / prev - 1) * 100) if prev > 0 and price > 0 else 0
+        day_diff = day_amt * qty if day_amt != 0 and qty > 0 else 0
         rows.append({
             **it,
-            "매입단가":   int(amt / qty) if qty > 0 else 0,
-            "현재가":     int(price) if price > 0 else 0,
-            "평가금액":   int(eval_amt),
-            "손익":       int(gain),
-            "전일대비(원)": int(day_diff),
-            "전일대비(%)": round(day_pct, 2),
+            "매입단가":      int(amt / qty) if qty > 0 else 0,
+            "현재가":        int(price) if price > 0 else 0,
+            "평가금액":      int(eval_amt),
+            "손익":          int(gain),
+            "전일대비(원)":  int(day_diff),
+            "전일대비(%)":   round(day_pct, 2),
             "누적수익률(%)": round(gain_pct, 2),
+            "월분배금":      int(monthly),
+            "분배율(%)":     rate,
         })
     disp_df = pd.DataFrame(rows)
 
@@ -729,7 +731,8 @@ def _render_holdings_tab(
     st.divider()
 
     tbl_cols = ["종목명","수량","매입단가","매입금액","현재가",
-                "평가금액","손익","전일대비(원)","전일대비(%)","누적수익률(%)"]
+                "평가금액","손익","전일대비(원)","전일대비(%)","누적수익률(%)",
+                "주당분배금","월분배금","분배율(%)"]
     _tbl_event = st.dataframe(
         disp_df[tbl_cols],
         hide_index=True, use_container_width=True,
@@ -744,6 +747,9 @@ def _render_holdings_tab(
             "전일대비(원)":  st.column_config.NumberColumn(format="%+,d"),
             "전일대비(%)":   st.column_config.NumberColumn(format="%+.2f%%"),
             "누적수익률(%)": st.column_config.NumberColumn(format="%+.2f%%"),
+            "주당분배금":    st.column_config.NumberColumn(format="%,d"),
+            "월분배금":      st.column_config.NumberColumn(format="%,d"),
+            "분배율(%)":     st.column_config.NumberColumn(format="%.2f%%"),
         },
         key="holdings_tbl",
     )

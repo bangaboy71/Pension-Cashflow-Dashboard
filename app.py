@@ -733,29 +733,71 @@ def _render_holdings_tab(
     tbl_cols = ["종목명","수량","매입단가","매입금액","현재가",
                 "평가금액","손익","전일대비(원)","전일대비(%)","누적수익률(%)",
                 "주당분배금","월분배금","분배율(%)"]
-    _tbl_event = st.dataframe(
-        disp_df[tbl_cols],
-        hide_index=True, use_container_width=True,
-        on_select="rerun", selection_mode="single-row",
-        column_config={
-            "수량":          st.column_config.NumberColumn(format="%,d"),
-            "매입단가":      st.column_config.NumberColumn(format="%,d"),
-            "매입금액":      st.column_config.NumberColumn(format="%,d"),
-            "현재가":        st.column_config.NumberColumn(format="%,d"),
-            "평가금액":      st.column_config.NumberColumn(format="%,d"),
-            "손익":          st.column_config.NumberColumn(format="%+,d"),
-            "전일대비(원)":  st.column_config.NumberColumn(format="%+,d"),
-            "전일대비(%)":   st.column_config.NumberColumn(format="%+.2f%%"),
-            "누적수익률(%)": st.column_config.NumberColumn(format="%+.2f%%"),
-            "주당분배금":    st.column_config.NumberColumn(format="%,d"),
-            "월분배금":      st.column_config.NumberColumn(format="%,d"),
-            "분배율(%)":     st.column_config.NumberColumn(format="%.2f%%"),
-        },
-        key="holdings_tbl",
+
+    # ── 색상 컬럼 적용 (Styler) ──────────────────────────
+    _color_cols = ["손익","전일대비(원)","전일대비(%)","누적수익률(%)"]
+
+    def _style_pnl(df):
+        """손익 컬럼 음양에 따라 텍스트 색상 적용"""
+        styles = pd.DataFrame("", index=df.index, columns=df.columns)
+        for col in _color_cols:
+            if col in df.columns:
+                styles[col] = df[col].apply(
+                    lambda v: "color: #7dffb0; font-weight:600"
+                    if isinstance(v, (int,float)) and v > 0
+                    else ("color: #FF4B4B; font-weight:600"
+                          if isinstance(v, (int,float)) and v < 0
+                          else "color: rgba(255,255,255,0.4)")
+                )
+        return styles
+
+    # 포맷 함수 정의
+    def _fmt(df):
+        fmt = {}
+        for col in df.columns:
+            if col in ("손익","전일대비(원)"):
+                fmt[col] = lambda v: f"{v:+,.0f}" if isinstance(v,(int,float)) else v
+            elif col in ("전일대비(%)","누적수익률(%)","분배율(%)"):
+                fmt[col] = lambda v: f"{v:+.2f}%" if isinstance(v,(int,float)) else v
+            elif col in ("수량","매입단가","매입금액","현재가","평가금액","주당분배금","월분배금"):
+                fmt[col] = lambda v: f"{v:,.0f}" if isinstance(v,(int,float)) else v
+        return fmt
+
+    _styled = (
+        disp_df[tbl_cols]
+        .style
+        .apply(_style_pnl, axis=None)
+        .format(_fmt(disp_df[tbl_cols]))
     )
-    _sel_rows = _tbl_event.selection.rows if hasattr(_tbl_event, "selection") else []
-    _sel_idx  = _sel_rows[0] if _sel_rows else 0
-    _sel_nm   = disp_df["종목명"].iloc[_sel_idx] if len(disp_df) > 0 else ""
+
+    # 종목 선택 — 색상 테이블과 분리해서 인덱스 선택 radio로 처리
+    _sel_nm_key = st.session_state.get("hld_sel_nm", "")
+    _nm_list    = disp_df["종목명"].tolist()
+    if _sel_nm_key not in _nm_list:
+        _sel_nm_key = _nm_list[0] if _nm_list else ""
+
+    st.dataframe(
+        _styled,
+        hide_index=True, use_container_width=True,
+        column_config={
+            "수량":       st.column_config.NumberColumn(),
+            "매입단가":   st.column_config.NumberColumn(),
+            "매입금액":   st.column_config.NumberColumn(),
+            "현재가":     st.column_config.NumberColumn(),
+            "평가금액":   st.column_config.NumberColumn(),
+            "주당분배금": st.column_config.NumberColumn(),
+            "월분배금":   st.column_config.NumberColumn(),
+        },
+    )
+
+    # 종목 선택 셀렉트박스 (상세 연동용)
+    _sel_nm = st.selectbox(
+        "상세 분석 종목",
+        _nm_list,
+        index=_nm_list.index(_sel_nm_key) if _sel_nm_key in _nm_list else 0,
+        key="hld_sel_nm",
+        label_visibility="collapsed",
+    )
 
     # ══════════════════════════════════════════════════════
     # 3. 분배금 요약 카드

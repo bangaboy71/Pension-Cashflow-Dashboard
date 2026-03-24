@@ -2477,9 +2477,10 @@ with st.sidebar:
     _isa_w_def = int(_shortfall * 0.3 / 10000) * 10000
     _gen_w_def = int(_shortfall * 0.1 / 10000) * 10000
 
-    _irp_max = max(int(irp_total * 0.10), 100_000)
-    _isa_max = max(int(isa_total * 0.10), 100_000)
-    _gen_max = max(int(general_total * 0.10) if general_total > 0 else 1_000_000, 100_000)
+    _irp_max = max(int(irp_total), 1_000_000)   # 잔액 전체
+    _isa_max = max(int(isa_total), 1_000_000)   # 잔액 전체
+    _ps_max2 = max(int(ps_total),  1_000_000)   # 잔액 전체
+    _gen_max = max(int(general_total) if general_total > 0 else 1_000_000, 1_000_000)
 
     irp_withdraw = st.number_input(
         "💼 IRP 월 인출액 (원)",
@@ -2492,7 +2493,7 @@ with st.sidebar:
         value=min(_isa_w_def, _isa_max), step=100_000, key="isa_withdraw",
     )
     _ps_w_def = int(_shortfall * 0.05 / 10000) * 10000
-    _ps_max   = max(int(ps_total * 0.10) if ps_total > 0 else 100_000, 100_000)
+    _ps_max   = max(int(ps_total) if ps_total > 0 else 1_000_000, 1_000_000)
     ps_withdraw = st.number_input(
         "🏦 연금저축 월 인출액 (원)",
         min_value=0, max_value=_ps_max,

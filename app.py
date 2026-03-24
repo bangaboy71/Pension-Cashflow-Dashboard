@@ -2262,20 +2262,24 @@ with st.sidebar:
     _isa_w_def = int(_shortfall * 0.3 / 10000) * 10000
     _gen_w_def = int(_shortfall * 0.1 / 10000) * 10000
 
+    _irp_max = max(int(irp_total * 0.10), 100_000)
+    _isa_max = max(int(isa_total * 0.10), 100_000)
+    _gen_max = max(int(general_total * 0.10) if general_total > 0 else 1_000_000, 100_000)
+
     irp_withdraw = st.number_input(
         "💼 IRP 월 인출액 (원)",
-        min_value=0, max_value=int(irp_total * 0.10),
-        value=_irp_w_def, step=100_000, key="irp_withdraw",
+        min_value=0, max_value=_irp_max,
+        value=min(_irp_w_def, _irp_max), step=100_000, key="irp_withdraw",
     )
     isa_withdraw = st.number_input(
         "📦 ISA 월 인출액 (원)",
-        min_value=0, max_value=int(isa_total * 0.10),
-        value=_isa_w_def, step=100_000, key="isa_withdraw",
+        min_value=0, max_value=_isa_max,
+        value=min(_isa_w_def, _isa_max), step=100_000, key="isa_withdraw",
     )
     gen_withdraw = st.number_input(
         "💵 일반 월 인출액 (원)",
-        min_value=0, max_value=int(general_total * 0.10) if general_total > 0 else 1_000_000,
-        value=_gen_w_def, step=100_000, key="gen_withdraw",
+        min_value=0, max_value=_gen_max,
+        value=min(_gen_w_def, _gen_max), step=100_000, key="gen_withdraw",
     )
     _total_withdraw = irp_withdraw + isa_withdraw + gen_withdraw
     _total_plan     = _pub_net_est + _total_withdraw

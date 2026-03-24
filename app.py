@@ -2058,153 +2058,80 @@ with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as
 # 4. 사이드바
 # ════════════════════════════════════════════════════════
 with st.sidebar:
-    # ── 분배금 입력 — 듀얼 모드 ────────────────────────────
-    st.header("💰 분배금 입력")
+    # ── 분배금 — 시트 자동값 + 조정 모드 ──────────────────
+    st.header("💰 월 분배금")
 
-    # 기본 추정값 계산
-    _irp_default_amt  = int(irp_total * (default_palantir / 100))
-    _isa_default_amt  = int(isa_total  * (default_kodex    / 100))
+    # ── 시트 기반 자동 계산값 ────────────────────────────
+    # 수량×주당분배금 → 월 분배금 (신규 연금현황 탭 자동 연산)
+    _irp_default_amt = int(irp_total * (default_palantir / 100))
+    _isa_default_amt = int(isa_total  * (default_kodex    / 100))
+    _ps_default_amt  = int(ps_total   * (default_ps       / 100)) if ps_total > 0 else 0
 
-    # 모드 토글
-    _use_amount = st.toggle(
-        "월 분배금(원) 직접 입력",
-        value=True,
-        key="input_mode_toggle",
-        help="ON: 확정된 분배금(원) 직접 입력  |  OFF: 분배율(%) 입력 후 자동 계산",
+    # 시트 자동값 표시 카드
+    _ps_auto_line = (f"<br>🏦 연금저축 <b>{_ps_default_amt:,.0f}원</b>") if ps_total > 0 else ""
+    st.markdown(
+        f"<div style='background:rgba(255,215,0,0.08); padding:8px 10px; "
+        f"border-radius:8px; border-left:3px solid #FFD700; font-size:0.82rem;'>"
+        f"<span style='color:rgba(255,255,255,0.5); font-size:0.75rem;'>시트 자동 계산 (수량×주당분배금)</span><br>"
+        f"💼 IRP <b>{_irp_default_amt:,.0f}원</b>  "
+        f"({default_palantir:.2f}%)<br>"
+        f"📦 ISA <b>{_isa_default_amt:,.0f}원</b>  "
+        f"({default_kodex:.2f}%)"
+        + _ps_auto_line +
+        f"</div>",
+        unsafe_allow_html=True,
     )
 
-    # 입력 모드 선택 (3가지)
+    # 기본값: 시트 자동값 사용
+    irp_income_input = _irp_default_amt
+    isa_income_input = _isa_default_amt
+    ps_income_input  = _ps_default_amt
+    palantir_rate    = default_palantir / 100
+    kodex_rate       = default_kodex    / 100
+    ps_rate          = default_ps       / 100
+
+    # ── 조정 모드 (필요 시만 사용) ───────────────────────
     _input_mode = st.radio(
-        "입력 방식",
-        ["💰 주당 분배금(원)", "💵 월 총 분배금(원)", "📊 분배율(%)"],
+        "분배금 조정",
+        ["🔒 시트 자동값 사용", "💵 실입금액 입력", "📊 분배율(%) 조정"],
         index=0,
         key="input_mode_radio",
         horizontal=True,
-        label_visibility="collapsed",
     )
 
-    if _input_mode == "💰 주당 분배금(원)":
-        # ── 모드 A: 주당 분배금 입력 → 수량×DPS = 월 총 분배금 ──
-        st.caption("주당 분배금을 입력하면 보유 수량 기준으로 자동 계산됩니다.")
-
-        # 수량 — 시트에 IRP수량/ISA수량 행이 있으면 자동, 없으면 직접 입력
-        if irp_shares > 0:
-            _irp_shares_val = int(irp_shares)
-            st.caption(f"IRP 보유 수량: {_irp_shares_val:,}주 (시트 자동)")
-        else:
-            _irp_shares_val = st.number_input(
-                "💼 IRP 보유 수량 (주)", min_value=0, value=20000,
-                step=100, key="irp_shares_input",
-            )
-        if isa_shares > 0:
-            _isa_shares_val = int(isa_shares)
-            st.caption(f"ISA 보유 수량: {_isa_shares_val:,}주 (시트 자동)")
-        else:
-            _isa_shares_val = st.number_input(
-                "📦 ISA 보유 수량 (주)", min_value=0, value=2300,
-                step=100, key="isa_shares_input",
-            )
-
-        # 주당 분배금 입력
-        _irp_dps_init = int(irp_dps_default) if irp_dps_default > 0             else (int(_irp_default_amt / _irp_shares_val) if _irp_shares_val > 0 else 185)
-        _isa_dps_init = int(isa_dps_default) if isa_dps_default > 0             else (int(_isa_default_amt / _isa_shares_val) if _isa_shares_val > 0 else 252)
-
-        irp_dps = st.number_input(
-            "💼 IRP 주당 분배금 (원)",
-            min_value=0, max_value=10_000,
-            value=_irp_dps_init, step=1,
-            key="irp_dps",
-            help="SOL 팔란티어커버드콜 1주당 이번달 분배금",
-        )
-        isa_dps = st.number_input(
-            "📦 ISA 주당 분배금 (원)",
-            min_value=0, max_value=10_000,
-            value=_isa_dps_init, step=1,
-            key="isa_dps",
-            help="KODEX200타겟위클리커버드콜 1주당 이번달 분배금",
-        )
-
-        # 월 총 분배금 계산
-        irp_income_input = irp_dps * _irp_shares_val
-        isa_income_input = isa_dps * _isa_shares_val
-
-        # 연금저축 입력 (시트에 연금저축 잔액이 있을 때만)
-        if ps_total > 0:
-            if ps_shares > 0:
-                _ps_shares_val = int(ps_shares)
-                st.caption(f"연금저축 보유 수량: {_ps_shares_val:,}주 (시트 자동)")
-            else:
-                _ps_shares_val = st.number_input(
-                    "🏦 연금저축 보유 수량 (주)", min_value=0, value=1000,
-                    step=100, key="ps_shares_input",
-                )
-            _ps_dps_init = int(ps_dps_default) if ps_dps_default > 0                 else (int(_ps_default_amt / _ps_shares_val) if _ps_shares_val > 0 else 100)
-            ps_dps = st.number_input(
-                "🏦 연금저축 주당 분배금 (원)",
-                min_value=0, max_value=10_000,
-                value=_ps_dps_init, step=1, key="ps_dps",
-            )
-            ps_income_input = ps_dps * _ps_shares_val
-        else:
-            ps_income_input = 0
-
-        # 결과 표시
-        _ps_line = (f"<br>연금저축 {ps_dps:,}원 × {_ps_shares_val:,}주 = "
-                    f"<b>{ps_income_input:,.0f}원</b>") if ps_total > 0 else ""
-        st.markdown(
-            f"<div style='background:rgba(255,215,0,0.08); padding:8px 10px; "
-            f"border-radius:8px; border-left:3px solid #FFD700; font-size:0.82rem; "
-            f"margin-top:4px;'>"
-            f"IRP {irp_dps:,}원 × {_irp_shares_val:,}주 = "
-            f"<b>{irp_income_input:,.0f}원</b><br>"
-            f"ISA {isa_dps:,}원 × {_isa_shares_val:,}주 = "
-            f"<b>{isa_income_input:,.0f}원</b>"
-            + _ps_line +
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-
-        # 분배율 역산
-        palantir_rate = irp_income_input / irp_total if irp_total > 0 else default_palantir / 100
-        kodex_rate    = isa_income_input / isa_total  if isa_total  > 0 else default_kodex    / 100
-        ps_rate       = ps_income_input  / ps_total   if ps_total   > 0 else default_ps       / 100
-        st.caption(f"↳ IRP {palantir_rate*100:.2f}% / ISA {kodex_rate*100:.2f}%"
-                   + (f" / 연금저축 {ps_rate*100:.2f}%" if ps_total > 0 else "")
-                   + " (시뮬레이션 반영)")
-
-    elif _input_mode == "💵 월 총 분배금(원)":
-        # ── 모드 B: 월 총 분배금(원) 직접 입력 ──────────────
-        st.caption("지급 확정된 월 총 분배금을 직접 입력하세요.")
+    if _input_mode == "💵 실입금액 입력":
+        # 실제 입금된 분배금이 시트와 다를 때 조정
+        st.caption("실제 입금된 분배금으로 수정하세요.")
+        _irp_max_b = max(int(irp_total * 0.10), 100_000)
+        _isa_max_b = max(int(isa_total * 0.10),  100_000)
         irp_income_input = st.number_input(
-            "💼 IRP 월 총 분배금 (원)",
-            min_value=0, max_value=int(irp_total * 0.10),
-            value=_irp_default_amt, step=10_000, key="irp_amt",
+            "💼 IRP 실입금액 (원)",
+            min_value=0, max_value=_irp_max_b,
+            value=min(_irp_default_amt, _irp_max_b), step=10_000, key="irp_amt",
         )
         isa_income_input = st.number_input(
-            "📦 ISA 월 총 분배금 (원)",
-            min_value=0, max_value=int(isa_total * 0.10),
-            value=_isa_default_amt, step=10_000, key="isa_amt",
+            "📦 ISA 실입금액 (원)",
+            min_value=0, max_value=_isa_max_b,
+            value=min(_isa_default_amt, _isa_max_b), step=10_000, key="isa_amt",
         )
-        ps_income_input = st.number_input(
-            "🏦 연금저축 월 총 분배금 (원)",
-            min_value=0, max_value=int(ps_total * 0.10) if ps_total > 0 else 10_000_000,
-            value=_ps_default_amt, step=10_000, key="ps_amt",
-        ) if ps_total > 0 else 0
+        if ps_total > 0:
+            _ps_max_b = max(int(ps_total * 0.10), 100_000)
+            ps_income_input = st.number_input(
+                "🏦 연금저축 실입금액 (원)",
+                min_value=0, max_value=_ps_max_b,
+                value=min(_ps_default_amt, _ps_max_b), step=10_000, key="ps_amt",
+            )
         palantir_rate = irp_income_input / irp_total if irp_total > 0 else default_palantir / 100
         kodex_rate    = isa_income_input / isa_total  if isa_total  > 0 else default_kodex    / 100
         ps_rate       = ps_income_input  / ps_total   if ps_total   > 0 else default_ps       / 100
         _irp_diff = irp_income_input - _irp_default_amt
         _isa_diff = isa_income_input - _isa_default_amt
-        st.caption(
-            f"IRP {palantir_rate*100:.2f}% / ISA {kodex_rate*100:.2f}%"
-            + (f" / 연금저축 {ps_rate*100:.2f}%" if ps_total > 0 else "")
-            + (f"  |  기준대비 IRP {_irp_diff:+,.0f} / ISA {_isa_diff:+,.0f}원"
-               if abs(_irp_diff)+abs(_isa_diff) > 0 else "")
-        )
+        if abs(_irp_diff) + abs(_isa_diff) > 0:
+            st.caption(f"기준 대비  IRP {_irp_diff:+,.0f}원 / ISA {_isa_diff:+,.0f}원")
 
-    else:
-        # ── 모드 C: 분배율(%) 슬라이더 ───────────────────────
-        st.caption("분배율을 조정하면 분배금이 자동 계산됩니다.")
+    elif _input_mode == "📊 분배율(%) 조정":
+        # 미래 시나리오 시뮬레이션용
+        st.caption("분배율 변경 시 예상 분배금을 시뮬레이션합니다.")
         palantir_rate = st.slider(
             "💼 IRP 월 분배율 (%)",
             min_value=0.5, max_value=3.0,
@@ -2215,14 +2142,15 @@ with st.sidebar:
             min_value=0.3, max_value=2.0,
             value=float(default_kodex), step=0.1, key="isa_rate",
         ) / 100
-        ps_rate = (st.slider(
-            "🏦 연금저축 월 분배율 (%)",
-            min_value=0.0, max_value=3.0,
-            value=float(default_ps), step=0.1, key="ps_rate_slider",
-        ) / 100) if ps_total > 0 else default_ps / 100
+        if ps_total > 0:
+            ps_rate = st.slider(
+                "🏦 연금저축 월 분배율 (%)",
+                min_value=0.0, max_value=3.0,
+                value=float(default_ps), step=0.1, key="ps_rate_slider",
+            ) / 100
         irp_income_input = int(irp_total * palantir_rate)
         isa_income_input = int(isa_total  * kodex_rate)
-        ps_income_input  = int(ps_total   * ps_rate)
+        ps_income_input  = int(ps_total   * ps_rate) if ps_total > 0 else 0
         st.caption(
             f"↳ IRP {irp_income_input:,.0f}원 / ISA {isa_income_input:,.0f}원"
             + (f" / 연금저축 {ps_income_input:,.0f}원" if ps_total > 0 else "")

@@ -1936,11 +1936,11 @@ def build_scenario_params(sc_df: pd.DataFrame, sc_name: str) -> dict:
     """
     sub = sc_df[sc_df["시나리오명"] == sc_name].copy()
     result = {
-        "irp_total": 0.0, "isa_total": 0.0, "gen_total": 0.0,
-        "irp_rate":  0.0, "isa_rate":  0.0, "gen_rate":  0.0,
-        "irp_종목": [],   "isa_종목": [],   "gen_종목": [],
+        "irp_total": 0.0, "isa_total": 0.0, "gen_total": 0.0, "ps_total": 0.0,
+        "irp_rate":  0.0, "isa_rate":  0.0, "gen_rate":  0.0, "ps_rate":  0.0,
+        "irp_종목": [],   "isa_종목": [],   "gen_종목": [],   "ps_종목": [],
     }
-    acc_map = {"IRP": "irp", "ISA": "isa", "일반": "gen"}
+    acc_map = {"IRP": "irp", "ISA": "isa", "일반": "gen", "연금저축": "ps"}
     for acc_kr, acc_en in acc_map.items():
         rows = sub[sub["계좌"] == acc_kr]
         rows = rows.copy()
@@ -2491,12 +2491,22 @@ with st.sidebar:
         min_value=0, max_value=_isa_max,
         value=min(_isa_w_def, _isa_max), step=100_000, key="isa_withdraw",
     )
+    if ps_total > 0:
+        _ps_w_def = int(_shortfall * 0.05 / 10000) * 10000
+        _ps_max   = max(int(ps_total * 0.10), 100_000)
+        ps_withdraw = st.number_input(
+            "🏦 연금저축 월 인출액 (원)",
+            min_value=0, max_value=_ps_max,
+            value=min(_ps_w_def, _ps_max), step=100_000, key="ps_withdraw",
+        )
+    else:
+        ps_withdraw = 0
     gen_withdraw = st.number_input(
         "💵 일반 월 인출액 (원)",
         min_value=0, max_value=_gen_max,
         value=min(_gen_w_def, _gen_max), step=100_000, key="gen_withdraw",
     )
-    _total_withdraw = irp_withdraw + isa_withdraw + gen_withdraw
+    _total_withdraw = irp_withdraw + isa_withdraw + ps_withdraw + gen_withdraw
     _total_plan     = _pub_net_est + _total_withdraw
     _plan_color     = "#7dffb0" if _total_plan >= target_monthly else "#FF4B4B"
     st.markdown(
@@ -2512,6 +2522,7 @@ with st.sidebar:
     irp_weight = irp_withdraw / max(_total_withdraw, 1)
     isa_weight = isa_withdraw / max(_total_withdraw, 1)
     gen_weight = gen_withdraw / max(_total_withdraw, 1)
+    ps_weight  = ps_withdraw  / max(_total_withdraw, 1)
 
     # ── 세금 옵션 ─────────────────────────────────────────
     st.divider()
@@ -2617,11 +2628,16 @@ if sc_choice != "기본 (시트 연금현황)" and not sc_df.empty:
     # 분배율 교체 — 모든 입력 모드에서 적용
     # (시나리오 분배율로 분배금 재계산 → 실제 대시보드 수치 변화)
     if _sc["irp_rate"] > 0:
-        palantir_rate  = _sc["irp_rate"]
+        palantir_rate    = _sc["irp_rate"]
         irp_income_input = int(irp_total * palantir_rate)
     if _sc["isa_rate"] > 0:
-        kodex_rate     = _sc["isa_rate"]
+        kodex_rate       = _sc["isa_rate"]
         isa_income_input = int(isa_total * kodex_rate)
+    if _sc.get("ps_rate", 0) > 0:
+        ps_rate          = _sc["ps_rate"]
+        ps_income_input  = int(ps_total * ps_rate)
+    if _sc.get("ps_total", 0) > 0:
+        ps_total         = _sc["ps_total"]
     _sc_applied = True
     # 종목명 추출 — _sc 딕셔너리 우선, 없으면 sc_df 직접 파싱
     def _extract_names(acc_kr):

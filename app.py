@@ -1246,6 +1246,19 @@ def safe_get(df: pd.DataFrame, item: str, default: float = 0.0) -> float:
 
 
 def validate_df(df: pd.DataFrame) -> list[str]:
+    # 신규 포맷은 별도 검증
+    if _is_new_format(df):
+        errors = []
+        acc_vals = df["계좌"].astype(str).str.strip().tolist()
+        if "공적연금" not in acc_vals:
+            errors.append("'공적연금' 행이 없습니다.")
+        if "목표생활비" not in acc_vals:
+            errors.append("'목표생활비' 행이 없습니다.")
+        if not any(a in acc_vals for a in ["IRP","ISA","일반","연금저축"]):
+            errors.append("IRP/ISA/일반/연금저축 계좌 행이 없습니다.")
+        return errors
+    # 기존 포맷 검증 (아래 원래 코드 계속)
+
     errors = []
     if df.empty:
         errors.append("시트가 비어 있습니다.")
@@ -1773,8 +1786,143 @@ def load_and_validate(url: str, gid: str) -> tuple[pd.DataFrame, list[str]]:
     return df, errors
 
 
+
+def _is_new_format(df: pd.DataFrame) -> bool:
+    """연금현황 탭이 신규 행 구조인지 판별 (계좌 컬럼 존재 여부)"""
+    return "계좌" in df.columns
+
+
+def parse_pension_sheet_new(df: pd.DataFrame) -> dict:
+    """
+    신규 연금현황 탭 파싱.
+    헤더: 계좌 | 종목명 | 종목코드 | 수량 | 주당분배금 | 원금 | 분배율(%) | 기본적용 | 메모
+    특수행: 계좌='공적연금' → 월 수령액(원금 컬럼)
+            계좌='목표생활비' → 월 목표(원금 컬럼)
+    """
+    # 숫자 컬럼 정규화
+    for col in ["수량", "주당분배금", "원금", "분배율(%)"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(
+                df[col].astype(str).str.replace(",", ""),
+                errors="coerce"
+            ).fillna(0)
+    if "계좌" in df.columns:
+        df["계좌"] = df["계좌"].astype(str).str.strip()
+    if "종목명" in df.columns:
+        df["종목명"] = df["종목명"].astype(str).str.strip()
+    if "종목코드" in df.columns:
+        df["종목코드"] = df["종목코드"].astype(str).str.strip()                          .str.replace(".KS", "").str.replace(".KQ", "")
+
+    def _sum_col(acc_kr, col, default=0.0):
+        rows = df[df["계좌"] == acc_kr]
+        if rows.empty or col not in rows.columns:
+            return default
+        return float(rows[col].sum())
+
+    def _first(acc_kr, col, default=0.0):
+        rows = df[df["계좌"] == acc_kr]
+        if rows.empty or col not in rows.columns:
+            return default
+        v = rows[col].iloc[0]
+        return float(v) if v and str(v) not in ("nan","0","") else default
+
+    def _get_items(acc_kr):
+        """계좌별 종목 리스트 반환"""
+        rows = df[df["계좌"] == acc_kr].copy()
+        if rows.empty:
+            return []
+        items = []
+        for _, row in rows.iterrows():
+            qty   = float(row.get("수량", 0) or 0)
+            dps   = float(row.get("주당분배금", 0) or 0)
+            amt   = float(row.get("원금", 0) or 0)
+            rate  = float(row.get("분배율(%)", 0) or 0)
+            code  = str(row.get("종목코드", "") or "").strip()
+            items.append({
+                "종목명":     str(row.get("종목명", "") or ""),
+                "종목코드":   code,
+                "수량":       qty,
+                "주당분배금": dps,
+                "원금":       amt,
+                "분배율(%)":  rate,
+            })
+        return items
+
+    # 계좌별 원금 합산
+    irp_total     = _sum_col("IRP",    "원금")
+    isa_total     = _sum_col("ISA",    "원금")
+    gen_total     = _sum_col("일반",   "원금")
+    ps_total      = _sum_col("연금저축","원금")
+
+    # 계좌별 가중평균 분배율 계산
+    def _wavg_rate(acc_kr):
+        rows = df[df["계좌"] == acc_kr]
+        if rows.empty: return 0.0
+        total_amt = rows["원금"].sum()
+        if total_amt <= 0: return 0.0
+        # 수량×주당분배금 우선, 없으면 원금×분배율
+        total_dist = 0.0
+        for _, r in rows.iterrows():
+            qty = float(r.get("수량", 0) or 0)
+            dps = float(r.get("주당분배금", 0) or 0)
+            amt = float(r.get("원금", 0) or 0)
+            rt  = float(r.get("분배율(%)", 0) or 0)
+            if qty > 0 and dps > 0:
+                total_dist += qty * dps
+            elif amt > 0 and rt > 0:
+                total_dist += amt * rt / 100
+        return (total_dist / total_amt * 100) if total_amt > 0 else 0.0
+
+    # 단일 종목 수량·DPS (기존 호환용)
+    def _first_shares(acc_kr):
+        rows = df[df["계좌"] == acc_kr]
+        if rows.empty: return 0.0
+        return float(rows["수량"].sum()) if "수량" in rows.columns else 0.0
+
+    def _first_dps(acc_kr):
+        rows = df[df["계좌"] == acc_kr]
+        if rows.empty: return 0.0
+        r = rows.iloc[0]
+        return float(r.get("주당분배금", 0) or 0)
+
+    return {
+        "public_pension":   _first("공적연금", "원금"),
+        "irp_total":        irp_total,
+        "isa_total":        isa_total,
+        "general_total":    gen_total,
+        "ps_total":         ps_total,
+        "target_monthly":   _first("목표생활비", "원금", default=1.0),
+        "isa_limit":        _first("ISA", "원금",
+                                   default=float(ISA_LIMIT)) if isa_total == 0
+                            else float(ISA_LIMIT),
+        # 분배율 (가중평균)
+        "default_palantir": _wavg_rate("IRP"),
+        "default_kodex":    _wavg_rate("ISA"),
+        "default_general":  _wavg_rate("일반") if _wavg_rate("일반") > 0 else 2.88,
+        "default_ps":       _wavg_rate("연금저축"),
+        # 수량·DPS (기존 모드 호환)
+        "irp_shares":       _first_shares("IRP"),
+        "isa_shares":       _first_shares("ISA"),
+        "ps_shares":        _first_shares("연금저축"),
+        "irp_dps_default":  _first_dps("IRP"),
+        "isa_dps_default":  _first_dps("ISA"),
+        "ps_dps_default":   _first_dps("연금저축"),
+        # 종목별 상세 (시나리오 연동용)
+        "irp_종목":         _get_items("IRP"),
+        "isa_종목":         _get_items("ISA"),
+        "gen_종목":         _get_items("일반"),
+        "ps_종목":          _get_items("연금저축"),
+    }
+
 def extract_values(df: pd.DataFrame) -> dict:
-    """DataFrame에서 모든 설정값을 추출해 dict로 반환"""
+    """
+    DataFrame에서 모든 설정값을 추출해 dict로 반환.
+    신규 포맷(계좌|종목명|수량… 행 구조)과 기존 포맷(항목|금액) 모두 지원.
+    """
+    if _is_new_format(df):
+        return parse_pension_sheet_new(df)
+
+    # ── 기존 포맷 (하위 호환) ────────────────────────────
     return {
         "public_pension":   safe_get(df, "공적연금"),
         "irp_total":        safe_get(df, "IRP"),
@@ -1783,19 +1931,18 @@ def extract_values(df: pd.DataFrame) -> dict:
         "target_monthly":   safe_get(df, "목표생활비",    default=1.0),
         "default_palantir": safe_get(df, "IRP기본분배율",  default=1.2),
         "default_kodex":    safe_get(df, "ISA기본분배율",  default=0.8),
-        "default_general":  safe_get(df, "일반기본분배율", default=2.88),  # 연간 분배율(%)
-        # 보유 수량 (주당 분배금 입력 모드에 사용)
-        "irp_shares":       safe_get(df, "IRP수량",  default=0.0),
-        "isa_shares":       safe_get(df, "ISA수량",  default=0.0),
-        "isa_limit":        safe_get(df, "ISA납입한도", default=float(ISA_LIMIT)),
-        # 주당 기본 분배금 (시트에 있으면 초기값으로 사용)
-        "irp_dps_default":  safe_get(df, "IRP주당분배금",    default=0.0),
-        "isa_dps_default":  safe_get(df, "ISA주당분배금",    default=0.0),
-        # 연금저축
-        "ps_total":         safe_get(df, "연금저축",         default=0.0),
+        "default_general":  safe_get(df, "일반기본분배율", default=2.88),
+        "irp_shares":       safe_get(df, "IRP수량",       default=0.0),
+        "isa_shares":       safe_get(df, "ISA수량",       default=0.0),
+        "isa_limit":        safe_get(df, "ISA납입한도",   default=float(ISA_LIMIT)),
+        "irp_dps_default":  safe_get(df, "IRP주당분배금", default=0.0),
+        "isa_dps_default":  safe_get(df, "ISA주당분배금", default=0.0),
+        "ps_total":         safe_get(df, "연금저축",      default=0.0),
         "default_ps":       safe_get(df, "연금저축기본분배율", default=1.0),
-        "ps_shares":        safe_get(df, "연금저축수량",      default=0.0),
+        "ps_shares":        safe_get(df, "연금저축수량",  default=0.0),
         "ps_dps_default":   safe_get(df, "연금저축주당분배금", default=0.0),
+        # 기존 포맷은 종목 상세 없음
+        "irp_종목": [], "isa_종목": [], "gen_종목": [], "ps_종목": [],
     }
 
 
@@ -1855,6 +2002,10 @@ with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as
     default_ps       = _vals["default_ps"]
     ps_shares        = _vals["ps_shares"]
     ps_dps_default   = _vals["ps_dps_default"]
+    # 신규 포맷: 종목 상세 (기존 포맷은 빈 리스트)
+    _pension_irp_items = _vals.get("irp_종목", [])
+    _pension_isa_items = _vals.get("isa_종목", [])
+    _pension_gen_items = _vals.get("gen_종목", [])
 
     # STEP 5 — 시나리오 탭 로드 (실패해도 앱 중단 없음)
     st.write("🎯 시나리오 데이터 로드 중...")
@@ -2320,9 +2471,10 @@ with st.sidebar:
 # 직접 작성 모드 우선 적용, 그 다음 시트 시나리오
 _sc_mode_val = st.session_state.get("sc_mode", "📋 시트 시나리오 선택")
 _sc_applied  = False   # 시나리오 적용 여부 플래그
-_irp_names   = []      # IRP 구성 종목명
-_isa_names   = []      # ISA 구성 종목명
-_gen_names   = []      # 일반 구성 종목명
+# 연금현황 신규 포맷: 기본 종목명은 시트에서 직접 가져옴
+_irp_names   = [r["종목명"] for r in _pension_irp_items if r.get("종목명")]
+_isa_names   = [r["종목명"] for r in _pension_isa_items if r.get("종목명")]
+_gen_names   = [r["종목명"] for r in _pension_gen_items if r.get("종목명")]
 
 if _sc_mode_val == "✏️ 앱에서 직접 작성":
     _cs = st.session_state.get("_custom_sc", {})

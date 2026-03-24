@@ -1880,9 +1880,14 @@ def load_scenarios(url: str, gid: str) -> pd.DataFrame:
         if "시나리오명" not in df.columns:
             df.insert(0, "시나리오명", "현재안")
 
-        # 월분배율(%) → 분배율(%) 매핑
-        if "분배율(%)" not in df.columns and "월분배율(%)" in df.columns:
-            rename_map["월분배율(%)"] = "분배율(%)"
+        # 분배율 컬럼 정규화 — 일분배율/월분배율 → 분배율(%)
+        for _rc in df.columns:
+            if "분배율" in _rc and _rc != "분배율(%)":
+                rename_map[_rc] = "분배율(%)"
+                break
+        # 평가액 → 원금 (시나리오 탭에 원금 없고 평가액만 있는 경우)
+        if "원금" not in df.columns and "평가액" in df.columns:
+            rename_map["평가액"] = "원금"
 
         # 평가액 → 원금 매핑 (원금 컬럼 없을 때)
         if "원금" not in df.columns:
@@ -1939,9 +1944,11 @@ def build_scenario_params(sc_df: pd.DataFrame, sc_name: str) -> dict:
     for acc_kr, acc_en in acc_map.items():
         rows = sub[sub["계좌"] == acc_kr]
         rows = rows.copy()
-        rows["원금"] = pd.to_numeric(
-            rows["원금"].astype(str).str.replace(",",""), errors="coerce"
-        ).fillna(0)
+        for _nc in ["원금","수량","주당분배금","현재가","분배율(%)"]:
+            if _nc in rows.columns:
+                rows[_nc] = pd.to_numeric(
+                    rows[_nc].astype(str).str.replace(",",""), errors="coerce"
+                ).fillna(0)
         total = rows["원금"].sum()
         if total < 0:
             continue
@@ -2060,8 +2067,18 @@ def parse_pension_sheet_new(df: pd.DataFrame) -> dict:
     특수행: 계좌='공적연금' → 월 수령액(원금 컬럼)
             계좌='목표생활비' → 월 목표(원금 컬럼)
     """
+    # 컬럼명 정규화 (시트 헤더 변형 대응)
+    col_rename = {}
+    for col in df.columns:
+        if col.strip() in ("매수가",):
+            pass  # 무시
+        elif "분배율" in col and col != "분배율(%)":
+            col_rename[col] = "분배율(%)"
+    if col_rename:
+        df = df.rename(columns=col_rename)
+
     # 숫자 컬럼 정규화
-    for col in ["수량", "주당분배금", "원금", "분배율(%)"]:
+    for col in ["수량", "주당분배금", "원금", "분배율(%)", "매수가", "평가액", "현재가"]:
         if col in df.columns:
             df[col] = pd.to_numeric(
                 df[col].astype(str).str.replace(",", ""),
@@ -2088,25 +2105,38 @@ def parse_pension_sheet_new(df: pd.DataFrame) -> dict:
         return float(v) if v and str(v) not in ("nan","0","") else default
 
     def _get_items(acc_kr):
-        """계좌별 종목 리스트 반환"""
+        """계좌별 종목 리스트 반환 — 종목명 없는 행도 포함"""
         rows = df[df["계좌"] == acc_kr].copy()
         if rows.empty:
             return []
         items = []
         for _, row in rows.iterrows():
+            nm    = str(row.get("종목명", "") or "").strip()
             qty   = float(row.get("수량", 0) or 0)
             dps   = float(row.get("주당분배금", 0) or 0)
             amt   = float(row.get("원금", 0) or 0)
             rate  = float(row.get("분배율(%)", 0) or 0)
             code  = str(row.get("종목코드", "") or "").strip()
-            items.append({
-                "종목명":     str(row.get("종목명", "") or ""),
-                "종목코드":   code,
-                "수량":       qty,
-                "주당분배금": dps,
-                "원금":       amt,
-                "분배율(%)":  rate,
-            })
+            # 종목명 없는 행: 계좌명을 종목명으로 대체 (원금 행)
+            if not nm or nm in ("nan",""):
+                if amt > 0:
+                    items.append({
+                        "종목명":     f"({acc_kr} 원금)",
+                        "종목코드":   "",
+                        "수량":       0,
+                        "주당분배금": 0,
+                        "원금":       amt,
+                        "분배율(%)":  rate,
+                    })
+            else:
+                items.append({
+                    "종목명":     nm,
+                    "종목코드":   code,
+                    "수량":       qty,
+                    "주당분배금": dps,
+                    "원금":       amt,
+                    "분배율(%)":  rate,
+                })
         return items
 
     # 계좌별 원금 합산
@@ -2153,9 +2183,7 @@ def parse_pension_sheet_new(df: pd.DataFrame) -> dict:
         "general_total":    gen_total,
         "ps_total":         ps_total,
         "target_monthly":   _first("목표생활비", "원금", default=1.0),
-        "isa_limit":        _first("ISA", "원금",
-                                   default=float(ISA_LIMIT)) if isa_total == 0
-                            else float(ISA_LIMIT),
+        "isa_limit":        float(ISA_LIMIT),  # 코드 상수 기준
         # 분배율 (가중평균)
         "default_palantir": _wavg_rate("IRP"),
         "default_kodex":    _wavg_rate("ISA"),

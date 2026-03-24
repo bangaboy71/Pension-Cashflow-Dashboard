@@ -3127,7 +3127,7 @@ with _main_tab1:
         _withdrawal_card_v2(
             w3, "💵 일반", "#87CEEB",
             wp["gen_need_gross"], wp["gen_rate_suggest"],
-            general_total, _gen_rate_now, _gen_actual,
+            general_total, (_gen_monthly_income / general_total if general_total > 0 else 0), _gen_actual,
             acc_key="gen",
         )
 

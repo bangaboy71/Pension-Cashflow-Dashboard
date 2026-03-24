@@ -1245,6 +1245,11 @@ def safe_get(df: pd.DataFrame, item: str, default: float = 0.0) -> float:
         return default
 
 
+def _is_new_format(df: pd.DataFrame) -> bool:
+    """연금현황 탭이 신규 행 구조인지 판별 (계좌 컬럼 존재 여부)"""
+    return "계좌" in df.columns
+
+
 def validate_df(df: pd.DataFrame) -> list[str]:
     # 신규 포맷은 별도 검증
     if _is_new_format(df):
@@ -1787,9 +1792,7 @@ def load_and_validate(url: str, gid: str) -> tuple[pd.DataFrame, list[str]]:
 
 
 
-def _is_new_format(df: pd.DataFrame) -> bool:
-    """연금현황 탭이 신규 행 구조인지 판별 (계좌 컬럼 존재 여부)"""
-    return "계좌" in df.columns
+# _is_new_format → validate_df 앞으로 이동
 
 
 def parse_pension_sheet_new(df: pd.DataFrame) -> dict:
@@ -1974,8 +1977,9 @@ with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as
         with st.expander("현재 시트 미리보기"):
             st.dataframe(df)
         st.info(
-            f"구글 시트에 아래 항목이 '항목' 컬럼에 정확히 있어야 합니다:\n"
-            + "\n".join(f"• {item}" for item in REQUIRED_ITEMS)
+            "구글 시트 연금현황 탭 구조를 확인하세요.\n"
+            "신규 포맷: 계좌|종목명|종목코드|수량|주당분배금|원금|분배율(%)|기본적용|메모\n"
+            "필수 행: 공적연금, 목표생활비, IRP/ISA/일반 중 하나 이상"
         )
         st.stop()
 

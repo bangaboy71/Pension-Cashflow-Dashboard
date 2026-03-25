@@ -1048,31 +1048,40 @@ def _render_watchlist_tab(
 
     # 현재가·평가액 업데이트 (시트값 우선, 없으면 실시간 크롤링값 사용)
     if price_map and not wl_df.empty:
+        def _get_code(row):
+            """종목코드를 정규화해서 price_map 키와 일치시킴"""
+            raw = str(row["종목코드"]) if "종목코드" in row.index else ""
+            return _normalize_code(raw)
+
         def _apply_price(row):
-            code = _normalize_code(str(row.get("종목코드","")))
-            p    = price_map.get(code, (0, 0.0, 0.0))[0]
+            code = _get_code(row)
+            val  = price_map.get(code, (0, 0.0, 0.0))
+            p    = val[0]
             # 실시간 크롤링값 우선 (시트값 무시)
-            return p if p > 0 else float(row.get("현재가", 0))
+            sheet_p = float(row["현재가"]) if "현재가" in row.index else 0
+            return p if p > 0 else sheet_p
+
         wl_df["현재가_실시간"] = wl_df.apply(_apply_price, axis=1)
         wl_df["전일대비(%)"]   = wl_df.apply(
-            lambda r: price_map.get(
-                _normalize_code(str(r.get("종목코드",""))),
-                (0,0.0,0.0))[1],
-            axis=1
+            lambda r: price_map.get(_get_code(r), (0, 0.0, 0.0))[1], axis=1
         )
         wl_df["전일대비(원)"]  = wl_df.apply(
-            lambda r: price_map.get(
-                _normalize_code(str(r.get("종목코드",""))),
-                (0,0.0,0.0))[2],
-            axis=1
+            lambda r: price_map.get(_get_code(r), (0, 0.0, 0.0))[2], axis=1
         )
-        # 평가액 = 현재가 × 수량
-        wl_df["평가액_실시간"] = wl_df["현재가_실시간"] * wl_df.get("수량", 0).fillna(0)
+        wl_df["평가액_실시간"] = (
+            wl_df["현재가_실시간"] *
+            wl_df["수량"].fillna(0) if "수량" in wl_df.columns
+            else pd.Series([0]*len(wl_df))
+        )
     else:
-        wl_df["현재가_실시간"] = wl_df.get("현재가", pd.Series([0]*len(wl_df))).fillna(0)
+        wl_df["현재가_실시간"] = wl_df["현재가"].fillna(0) if "현재가" in wl_df.columns                                  else pd.Series([0]*len(wl_df))
         wl_df["전일대비(%)"]   = 0.0
         wl_df["전일대비(원)"]  = 0.0
-        wl_df["평가액_실시간"] = wl_df["현재가_실시간"] * wl_df.get("수량", pd.Series([0]*len(wl_df))).fillna(0)
+        wl_df["평가액_실시간"] = (
+            wl_df["현재가_실시간"] *
+            wl_df["수량"].fillna(0) if "수량" in wl_df.columns
+            else pd.Series([0]*len(wl_df))
+        )
 
     # ── 시트 미연동 안내 ────────────────────────────────
     if wl_df.empty:

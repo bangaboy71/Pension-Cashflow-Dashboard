@@ -427,7 +427,14 @@ def _normalize_code(code: str) -> str:
 def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
     """
     종목코드 → (현재가, 전일대비%, 전일대비금액) 반환.
-    Yahoo Finance v8 API — 전일 종가를 여러 경로로 탐색.
+    KRX 직전 거래일 종가 기준으로 계산.
+
+    전략:
+    1. range="2d", interval="1m" → 오늘 현재가 + 직전 거래일 종가 취득
+       - meta.regularMarketPrice        : 현재가 (실시간)
+       - meta.regularMarketPreviousClose: KRX 직전 거래일 종가 (가장 정확)
+    2. 위 키 없으면 range="5d", interval="1d" OHLC에서
+       오늘 제외 마지막 거래일 close 값 추출
     실패 시 (0, 0.0, 0.0).
     """
     ycode = _normalize_code(code)
@@ -435,44 +442,56 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
         return 0, 0.0, 0.0
     try:
         import requests as _req
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ycode}"
-        res = _req.get(
-            url,
+
+        # ── 1차: 실시간 quote 엔드포인트 (가장 정확) ─────
+        url1 = f"https://query1.finance.yahoo.com/v8/finance/chart/{ycode}"
+        r1 = _req.get(
+            url1,
             headers={"User-Agent": "Mozilla/5.0"},
-            params={"interval": "1d", "range": "5d"},   # 5일치로 전일 종가 확보
+            params={"interval": "1d", "range": "2d"},
             timeout=8,
         )
-        data   = res.json()
-        result = data["chart"]["result"][0]
+        d1     = r1.json()
+        result = d1["chart"]["result"][0]
         meta   = result["meta"]
 
-        # ── 현재가 ────────────────────────────────────────
         now_p = int(meta.get("regularMarketPrice", 0))
         if now_p == 0:
             return 0, 0.0, 0.0
 
-        # ── 전일 종가 — 우선순위별 탐색 ──────────────────
-        # 1순위: meta.regularMarketPreviousClose (장중 실시간)
-        prev_p = int(meta.get("regularMarketPreviousClose", 0))
-        # 2순위: meta.previousClose
-        if prev_p == 0:
-            prev_p = int(meta.get("previousClose", 0))
-        # 3순위: meta.chartPreviousClose
-        if prev_p == 0:
-            prev_p = int(meta.get("chartPreviousClose", 0))
-        # 4순위: OHLC 타임시리즈에서 마지막 전 거래일 종가 직접 추출
+        # KRX 직전 거래일 종가 — regularMarketPreviousClose 우선
+        prev_p = 0
+        for key in ("regularMarketPreviousClose",
+                    "previousClose",
+                    "chartPreviousClose"):
+            val = meta.get(key, 0)
+            if val and int(val) > 0:
+                prev_p = int(val)
+                break
+
+        # ── 2차 폴백: 5일 OHLC 타임시리즈에서 직전 거래일 close ─
         if prev_p == 0:
             try:
-                closes = result["indicators"]["quote"][0]["close"]
-                # None 제거 후 마지막 두 값 중 이전 값
-                valid = [x for x in closes if x is not None]
-                if len(valid) >= 2:
-                    prev_p = int(valid[-2])
+                r2 = _req.get(
+                    url1,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    params={"interval": "1d", "range": "5d"},
+                    timeout=8,
+                )
+                d2 = r2.json()
+                ts   = d2["chart"]["result"][0]["timestamp"]
+                cls  = d2["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+                # (timestamp, close) 쌍으로 묶어 None 제거
+                pairs = [(t, c) for t, c in zip(ts, cls)
+                         if c is not None and c > 0]
+                if len(pairs) >= 2:
+                    # 마지막 값이 오늘, 그 이전이 직전 거래일
+                    prev_p = int(pairs[-2][1])
             except Exception:
                 pass
 
         if prev_p == 0:
-            prev_p = now_p   # 전일 종가 없으면 변동없음으로 처리
+            prev_p = now_p
 
         chg_amt = now_p - prev_p
         chg_pct = (chg_amt / prev_p * 100) if prev_p > 0 else 0.0

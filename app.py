@@ -677,9 +677,9 @@ def _render_holdings_tab(
     for it in all_items:
         raw_code = it["종목코드"]
         code     = _normalize_code(raw_code)
-        price    = prices_map.get(code, 0)
-        day_pct  = prev_pct_map.get(code, 0.0)
-        day_amt  = prev_amt_map.get(code, 0)
+        price    = prices_map.get(code, 0) or prices_map.get(raw_code, 0)
+        day_pct  = prev_pct_map.get(code, 0.0) or prev_pct_map.get(raw_code, 0.0)
+        day_amt  = prev_amt_map.get(code, 0) or prev_amt_map.get(raw_code, 0)
         qty      = it["수량"]
         dps      = it["주당분배금"]
         amt      = it["매입금액"]
@@ -744,9 +744,9 @@ def _render_holdings_tab(
         for col in _color_cols:
             if col in df.columns:
                 styles[col] = df[col].apply(
-                    lambda v: "color: #7dffb0; font-weight:600"
+                    lambda v: "color: #FF4B4B; font-weight:600"   # 양수 → 빨강
                     if isinstance(v, (int,float)) and v > 0
-                    else ("color: #FF4B4B; font-weight:600"
+                    else ("color: #4B9EFF; font-weight:600"        # 음수 → 파랑
                           if isinstance(v, (int,float)) and v < 0
                           else "color: rgba(255,255,255,0.4)")
                 )
@@ -1051,9 +1051,8 @@ def _render_watchlist_tab(
         def _apply_price(row):
             code = _normalize_code(str(row.get("종목코드","")))
             p    = price_map.get(code, (0, 0.0, 0.0))[0]
-            # 시트에 현재가가 입력되어 있으면 우선 사용
-            sheet_p = float(row.get("현재가", 0))
-            return sheet_p if sheet_p > 0 else p
+            # 실시간 크롤링값 우선 (시트값 무시)
+            return p if p > 0 else float(row.get("현재가", 0))
         wl_df["현재가_실시간"] = wl_df.apply(_apply_price, axis=1)
         wl_df["전일대비(%)"]   = wl_df.apply(
             lambda r: price_map.get(
@@ -2530,6 +2529,18 @@ with st.sidebar:
 
     # ── 시나리오 선택 ─────────────────────────────────
     st.divider()
+    if st.button("🔄 실시간 데이터 전체 갱신",
+                 use_container_width=True, key="global_refresh"):
+        load_sheet.clear()
+        load_and_validate.clear()
+        fetch_watchlist_prices.clear()
+        try:
+            fetch_price_history.clear()
+        except Exception:
+            pass
+        st.rerun()
+    st.divider()
+
     st.subheader("🎯 포트폴리오 시나리오")
 
     # 시트 시나리오 선택 전용

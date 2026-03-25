@@ -427,68 +427,66 @@ def _normalize_code(code: str) -> str:
 def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
     """
     종목코드 → (현재가, 전일대비%, 전일대비금액) 반환.
-    KRX 직전 거래일 종가 기준으로 계산.
+    KRX 직전 거래일 실제 종가(수정주가 아님) 기준.
 
-    전략:
-    1. range="2d", interval="1m" → 오늘 현재가 + 직전 거래일 종가 취득
-       - meta.regularMarketPrice        : 현재가 (실시간)
-       - meta.regularMarketPreviousClose: KRX 직전 거래일 종가 (가장 정확)
-    2. 위 키 없으면 range="5d", interval="1d" OHLC에서
-       오늘 제외 마지막 거래일 close 값 추출
-    실패 시 (0, 0.0, 0.0).
+    핵심 원칙:
+    - meta 의 previousClose 계열 키는 수정주가(adjusted)일 수 있으므로 사용 안 함
+    - range="5d", interval="1d" OHLC의 quote.close 배열에서
+      타임스탬프가 오늘 이전인 마지막 값을 직전 거래일 종가로 사용
+      (quote.close = 수정 전 실제 시장 종가)
+    - 현재가는 meta.regularMarketPrice (장 중 실시간)
     """
     ycode = _normalize_code(code)
     if not ycode:
         return 0, 0.0, 0.0
     try:
         import requests as _req
+        import time as _time
 
-        # ── 1차: 실시간 quote 엔드포인트 (가장 정확) ─────
-        url1 = f"https://query1.finance.yahoo.com/v8/finance/chart/{ycode}"
-        r1 = _req.get(
-            url1,
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ycode}"
+
+        # 5일 OHLC — quote.close 는 수정 전 실제 종가
+        res = _req.get(
+            url,
             headers={"User-Agent": "Mozilla/5.0"},
-            params={"interval": "1d", "range": "2d"},
+            params={"interval": "1d", "range": "5d"},
             timeout=8,
         )
-        d1     = r1.json()
-        result = d1["chart"]["result"][0]
+        data   = res.json()
+        result = data["chart"]["result"][0]
         meta   = result["meta"]
 
+        # 현재가 (실시간)
         now_p = int(meta.get("regularMarketPrice", 0))
         if now_p == 0:
             return 0, 0.0, 0.0
 
-        # KRX 직전 거래일 종가 — regularMarketPreviousClose 우선
+        # 오늘 날짜 기준 타임스탬프 (KST 기준 당일 0시 UTC)
+        import datetime as _dt
+        now_kst = _dt.datetime.utcnow() + _dt.timedelta(hours=9)
+        today_start_utc = int(
+            _dt.datetime(now_kst.year, now_kst.month, now_kst.day, 0, 0, 0)
+            .replace(tzinfo=_dt.timezone.utc).timestamp()
+        ) - 9 * 3600  # KST → UTC
+
+        ts_list  = result.get("timestamp", [])
+        cls_list = result["indicators"]["quote"][0].get("close", [])
+
+        # 오늘 이전 거래일의 close 값 중 가장 최근 것 = 직전 거래일 종가
         prev_p = 0
-        for key in ("regularMarketPreviousClose",
-                    "previousClose",
-                    "chartPreviousClose"):
-            val = meta.get(key, 0)
-            if val and int(val) > 0:
-                prev_p = int(val)
+        for ts, cl in zip(reversed(ts_list), reversed(cls_list)):
+            if cl is None or cl <= 0:
+                continue
+            if ts < today_start_utc:
+                prev_p = int(round(cl))
                 break
 
-        # ── 2차 폴백: 5일 OHLC 타임시리즈에서 직전 거래일 close ─
+        # 폴백: 타임스탬프 비교 안되면 배열 끝에서 두 번째 값
         if prev_p == 0:
-            try:
-                r2 = _req.get(
-                    url1,
-                    headers={"User-Agent": "Mozilla/5.0"},
-                    params={"interval": "1d", "range": "5d"},
-                    timeout=8,
-                )
-                d2 = r2.json()
-                ts   = d2["chart"]["result"][0]["timestamp"]
-                cls  = d2["chart"]["result"][0]["indicators"]["quote"][0]["close"]
-                # (timestamp, close) 쌍으로 묶어 None 제거
-                pairs = [(t, c) for t, c in zip(ts, cls)
-                         if c is not None and c > 0]
-                if len(pairs) >= 2:
-                    # 마지막 값이 오늘, 그 이전이 직전 거래일
-                    prev_p = int(pairs[-2][1])
-            except Exception:
-                pass
+            valid = [(t, cl) for t, cl in zip(ts_list, cls_list)
+                     if cl is not None and cl > 0]
+            if len(valid) >= 2:
+                prev_p = int(round(valid[-2][1]))
 
         if prev_p == 0:
             prev_p = now_p

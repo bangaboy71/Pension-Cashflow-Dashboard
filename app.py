@@ -427,7 +427,8 @@ def _normalize_code(code: str) -> str:
 def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
     """
     종목코드 → (현재가, 전일대비%, 전일대비금액) 반환.
-    Yahoo Finance API 사용. 실패 시 (0, 0.0, 0.0).
+    Yahoo Finance v8 API — 전일 종가를 여러 경로로 탐색.
+    실패 시 (0, 0.0, 0.0).
     """
     ycode = _normalize_code(code)
     if not ycode:
@@ -438,13 +439,41 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
         res = _req.get(
             url,
             headers={"User-Agent": "Mozilla/5.0"},
-            params={"interval": "1d", "range": "2d"},
-            timeout=5,
+            params={"interval": "1d", "range": "5d"},   # 5일치로 전일 종가 확보
+            timeout=8,
         )
         data   = res.json()
-        meta   = data["chart"]["result"][0]["meta"]
-        now_p  = int(meta.get("regularMarketPrice", 0))
-        prev_p = int(meta.get("previousClose", now_p))
+        result = data["chart"]["result"][0]
+        meta   = result["meta"]
+
+        # ── 현재가 ────────────────────────────────────────
+        now_p = int(meta.get("regularMarketPrice", 0))
+        if now_p == 0:
+            return 0, 0.0, 0.0
+
+        # ── 전일 종가 — 우선순위별 탐색 ──────────────────
+        # 1순위: meta.regularMarketPreviousClose (장중 실시간)
+        prev_p = int(meta.get("regularMarketPreviousClose", 0))
+        # 2순위: meta.previousClose
+        if prev_p == 0:
+            prev_p = int(meta.get("previousClose", 0))
+        # 3순위: meta.chartPreviousClose
+        if prev_p == 0:
+            prev_p = int(meta.get("chartPreviousClose", 0))
+        # 4순위: OHLC 타임시리즈에서 마지막 전 거래일 종가 직접 추출
+        if prev_p == 0:
+            try:
+                closes = result["indicators"]["quote"][0]["close"]
+                # None 제거 후 마지막 두 값 중 이전 값
+                valid = [x for x in closes if x is not None]
+                if len(valid) >= 2:
+                    prev_p = int(valid[-2])
+            except Exception:
+                pass
+
+        if prev_p == 0:
+            prev_p = now_p   # 전일 종가 없으면 변동없음으로 처리
+
         chg_amt = now_p - prev_p
         chg_pct = (chg_amt / prev_p * 100) if prev_p > 0 else 0.0
         return now_p, round(chg_pct, 2), chg_amt

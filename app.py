@@ -562,6 +562,11 @@ def fetch_price_history(code: str, pages: int = 5) -> pd.DataFrame:
 
         df = pd.DataFrame(rows)
         df = df[df["종가"] > 0].sort_values("날짜").reset_index(drop=True)
+        # 저가·고가가 0이면 종가로 대체 (데이터 누락 방지)
+        if "저가" in df.columns:
+            df["저가"] = df.apply(lambda r: r["종가"] if r["저가"] <= 0 else r["저가"], axis=1)
+        if "고가" in df.columns:
+            df["고가"] = df.apply(lambda r: r["종가"] if r["고가"] <= 0 else r["고가"], axis=1)
         return df
     except Exception:
         return pd.DataFrame()
@@ -1043,8 +1048,10 @@ def _render_holdings_tab(
                                 annotation_position="bottom right",
                                 annotation_font_color="rgba(255,255,255,0.5)",
                             )
-                        _y_min = hist_df["저가"].min() if "저가" in hist_df.columns else hist_df["종가"].min()
-                        _y_max = hist_df["고가"].max() if "고가" in hist_df.columns else hist_df["종가"].max()
+                        _low_s  = hist_df["저가"][hist_df["저가"] > 0] if "저가" in hist_df.columns else hist_df["종가"]
+                        _high_s = hist_df["고가"][hist_df["고가"] > 0] if "고가" in hist_df.columns else hist_df["종가"]
+                        _y_min  = float(_low_s.min())  if len(_low_s)  > 0 else float(hist_df["종가"].min())
+                        _y_max  = float(_high_s.max()) if len(_high_s) > 0 else float(hist_df["종가"].max())
                         # 목표가는 Y축 범위에서 제외 (수평선으로만 표시)
                         _y_range = _y_max - _y_min
                         _pad = max(_y_range * 0.08, _y_max * 0.005)
@@ -1445,13 +1452,15 @@ def _render_watchlist_tab(
                         )
 
                     # ── Y축 범위: 데이터 변동폭 기준으로 적정 범위 설정 ──
-                    _y_min   = hist_df["저가"].min()  if "저가" in hist_df.columns else hist_df["종가"].min()
-                    _y_max   = hist_df["고가"].max()  if "고가" in hist_df.columns else hist_df["종가"].max()
+                    _low_s   = hist_df["저가"][hist_df["저가"] > 0] if "저가" in hist_df.columns else hist_df["종가"]
+                    _high_s  = hist_df["고가"][hist_df["고가"] > 0] if "고가" in hist_df.columns else hist_df["종가"]
+                    _y_min   = float(_low_s.min())  if len(_low_s)  > 0 else float(hist_df["종가"].min())
+                    _y_max   = float(_high_s.max()) if len(_high_s) > 0 else float(hist_df["종가"].max())
                     _y_range = _y_max - _y_min
                     # 목표가는 Y축 범위에서 제외 (수평선으로만 표시)
                     # 패딩 8% 추가
                     _pad     = max(_y_range * 0.08, _y_max * 0.005)
-                    _y_lo    = max(0, _y_min - _pad)
+                    _y_lo    = _y_min - _pad
                     _y_hi    = _y_max + _pad
 
                     # 틱 간격: 범위를 5~7개 구간으로 나눔

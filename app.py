@@ -1045,10 +1045,9 @@ def _render_holdings_tab(
                             )
                         _y_min = hist_df["저가"].min() if "저가" in hist_df.columns else hist_df["종가"].min()
                         _y_max = hist_df["고가"].max() if "고가" in hist_df.columns else hist_df["종가"].max()
-                        if _tgt_p > 0:
-                            _y_min = min(_y_min, _tgt_p)
-                            _y_max = max(_y_max, _tgt_p)
-                        _pad = max((_y_max-_y_min)*0.08, _y_max*0.005)
+                        # 목표가는 Y축 범위에서 제외 (수평선으로만 표시)
+                        _y_range = _y_max - _y_min
+                        _pad = max(_y_range * 0.08, _y_max * 0.005)
 
                         fig_h.update_layout(
                             title=dict(
@@ -1449,12 +1448,8 @@ def _render_watchlist_tab(
                     _y_min   = hist_df["저가"].min()  if "저가" in hist_df.columns else hist_df["종가"].min()
                     _y_max   = hist_df["고가"].max()  if "고가" in hist_df.columns else hist_df["종가"].max()
                     _y_range = _y_max - _y_min
-                    # 목표가·현재가도 범위에 포함
-                    if _tgt_p > 0:
-                        _y_min = min(_y_min, _tgt_p)
-                        _y_max = max(_y_max, _tgt_p)
-                        _y_range = _y_max - _y_min
-                    # 패딩 10% 추가 (상하 5%씩)
+                    # 목표가는 Y축 범위에서 제외 (수평선으로만 표시)
+                    # 패딩 8% 추가
                     _pad     = max(_y_range * 0.08, _y_max * 0.005)
                     _y_lo    = max(0, _y_min - _pad)
                     _y_hi    = _y_max + _pad

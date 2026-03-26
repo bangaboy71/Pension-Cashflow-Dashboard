@@ -2619,7 +2619,7 @@ with st.sidebar:
     # 시트 시나리오 선택 전용
     if sc_names:
             # 기본적용 시나리오 자동 선택 (최초 1회)
-            _sc_opts     = ["기본 (시트 연금현황)"] + sc_names
+            _sc_opts     = ["기본 시트 현황"] + sc_names
             _sc_def_idx  = 0
             if sc_default_name and sc_default_name in sc_names:
                 _sc_def_idx = _sc_opts.index(sc_default_name)
@@ -2638,7 +2638,7 @@ with st.sidebar:
                 st.caption(f"📌 기본: {sc_default_name}")
 
             # 구성 종목 표출 — 기본(연금현황) 포함 항상 표시
-            if sc_choice == "기본 (시트 연금현황)":
+            if sc_choice == "기본 시트 현황":
                 _disp_items = {
                     "IRP":    _pension_irp_items,
                     "ISA":    _pension_isa_items,
@@ -2657,7 +2657,7 @@ with st.sidebar:
             # 계좌별 요약 캡션
             _sc_sum = []
             for acc_kr, acc_en in [("IRP","irp"),("ISA","isa"),("일반","gen"),("연금저축","ps")]:
-                if sc_choice == "기본 (시트 연금현황)":
+                if sc_choice == "기본 시트 현황":
                     _t = {"IRP": irp_total, "ISA": isa_total, "일반": general_total,
                           "연금저축": ps_total}.get(acc_kr, 0)
                     _r = {"IRP": default_palantir, "ISA": default_kodex,
@@ -2697,7 +2697,7 @@ _irp_names   = [r["종목명"] for r in _pension_irp_items if r.get("종목명")
 _isa_names   = [r["종목명"] for r in _pension_isa_items if r.get("종목명")]
 _gen_names   = [r["종목명"] for r in _pension_gen_items if r.get("종목명")]
 
-if sc_choice != "기본 (시트 연금현황)" and not sc_df.empty:
+if sc_choice != "기본 시트 현황" and not sc_df.empty:
     _sc = build_scenario_params(sc_df, sc_choice)
     # 원금 교체
     if _sc["irp_total"]  > 0: irp_total = _sc["irp_total"]
@@ -2825,7 +2825,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 # 시나리오 배지
-if sc_choice != "기본 (시트 연금현황)" and sc_names:
+if sc_choice != "기본 시트 현황" and sc_names:
     st.markdown(
         f"<span style='background:rgba(255,215,0,0.15); color:#FFD700; "
         f"padding:3px 12px; border-radius:12px; font-size:0.82rem; "

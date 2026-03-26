@@ -708,15 +708,33 @@ def _render_holdings_tab(
     port_df = pd.DataFrame(all_items)
 
     # ── 실시간 주가 조회 (fetch_watchlist_prices 재사용) ─
-    codes = [_normalize_code(r["종목코드"])
-             for r in all_items
-             if r["종목코드"] and r["종목코드"] not in ("nan","0","")]
-    codes = [c for c in codes if c]
-    prices_raw = fetch_watchlist_prices(tuple(set(codes))) if codes else {}
+    codes = []
+    for r in all_items:
+        raw_c = str(r["종목코드"]).strip()
+        if raw_c and raw_c not in ("nan","0",""):
+            norm_c = _normalize_code(raw_c)
+            if norm_c:
+                codes.append(norm_c)
+    codes = list(set(codes))
+
+    prices_raw = {}
+    if codes:
+        with st.spinner(f"실시간 주가 조회 중... ({len(codes)}종목)"):
+            try:
+                prices_raw = fetch_watchlist_prices(tuple(codes))
+            except Exception as _e:
+                st.caption(f"주가 조회 오류: {_e}")
+
     # prices_raw: {코드: (현재가, 전일대비%, 전일대비금액)}
-    prices_map = {k: v[0] for k, v in prices_raw.items()}
+    prices_map   = {k: v[0] for k, v in prices_raw.items() if v[0] > 0}
     prev_pct_map = {k: v[1] for k, v in prices_raw.items()}
     prev_amt_map = {k: v[2] for k, v in prices_raw.items()}
+
+    # 조회 결과 캡션 표시
+    _ok_cnt = len([v for v in prices_map.values() if v > 0])
+    if codes:
+        st.caption(f"📡 실시간 주가 연동: {_ok_cnt}/{len(codes)}종목 "
+                   f"{'✅' if _ok_cnt == len(codes) else '⚠️ 일부 실패'}")
 
     # 주가 반영 → 평가금액·손익 계산
     rows = []

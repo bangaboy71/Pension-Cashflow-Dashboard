@@ -2623,23 +2623,18 @@ with st.sidebar:
     # 시트 시나리오 선택 전용
     if sc_names:
             # 기본적용 시나리오 자동 선택 (최초 1회)
-            _sc_opts     = ["기본 시트 현황"] + sc_names
-            _sc_def_idx  = 0
-            if sc_default_name and sc_default_name in sc_names:
-                _sc_def_idx = _sc_opts.index(sc_default_name)
+            _sc_opts = ["기본 시트 현황"] + sc_names
 
             sc_choice = st.selectbox(
                 "시나리오 선택",
                 _sc_opts,
-                index=_sc_def_idx,
+                index=0,   # 항상 기본 시트 현황으로 시작
                 key="sc_choice",
-                help="구글 시트 '시나리오' 탭에서 기본적용=Y로 설정하면 자동 선택됩니다.",
+                help="시나리오 선택 시 해당 포트폴리오 기준으로 계산됩니다.",
             )
-            # 기본 적용 배지 표시
-            if sc_default_name and sc_choice == sc_default_name:
-                st.caption(f"✅ 기본 시나리오 자동 적용 중")
-            elif sc_default_name:
-                st.caption(f"📌 기본: {sc_default_name}")
+            # 기본적용=Y 시나리오 안내 (자동 선택 안 함)
+            if sc_default_name:
+                st.caption(f"📌 권장 시나리오: {sc_default_name}")
 
             # 구성 종목 표출 — 기본(연금현황) 포함 항상 표시
             if sc_choice == "기본 시트 현황":

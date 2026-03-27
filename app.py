@@ -2437,6 +2437,11 @@ def extract_values(df: pd.DataFrame) -> dict:
 # ── 5단계 로딩 진행률 ────────────────────────────────────
 with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as _status:
 
+    # STEP 0 — 납입현황 탭 로딩
+    contrib_df     = load_contribution(SHEET_URL, CONTRIBUTION_SHEET_GID)
+    contrib_year   = datetime.now().year
+    contrib_status = calc_contribution_status(contrib_df, contrib_year)
+
     # STEP 1 — 구글 시트 연결
     st.write("📋 구글 시트 연결 중...")
     try:

@@ -3212,6 +3212,7 @@ with _main_tab1:
         # general_rate_hm = 연분배율/100/12 (월 환산율)
         _gen_actual      = _gen_monthly_income   # 시나리오/연금현황 수량×DPS 기반
 
+        # 순서: IRP → ISA → 연금저축 → 일반
         _withdrawal_card_v2(
             w1, "💼 IRP", "#FFD700",
             wp["irp_need_gross"], wp["irp_rate_suggest"],
@@ -3225,19 +3226,20 @@ with _main_tab1:
             shares_cur=_isa_shares_cur, dps_cur=_isa_dps_cur,
             acc_key="isa", isa_limit=float(isa_limit),
         )
-        _withdrawal_card_v2(
-            w3, "💵 일반", "#87CEEB",
-            wp["gen_need_gross"], wp["gen_rate_suggest"],
-            general_total, (_gen_monthly_income / general_total if general_total > 0 else 0), _gen_actual,
-            acc_key="gen",
-        )
-        if _has_ps_card and w4 is not None:
+        if _has_ps_card and w3 is not None:
             _withdrawal_card_v2(
-                w4, "🏦 연금저축", "#5DCAA5",
+                w3, "🏦 연금저축", "#5DCAA5",
                 wp.get("ps_need_gross", 0.0), wp.get("ps_rate_suggest", 0.0),
                 ps_total, ps_rate, ps_income,
                 acc_key="ps",
             )
+        _gen_col = w4 if _has_ps_card and w4 is not None else w3
+        _withdrawal_card_v2(
+            _gen_col, "💵 일반", "#87CEEB",
+            wp["gen_need_gross"], wp["gen_rate_suggest"],
+            general_total, (_gen_monthly_income / general_total if general_total > 0 else 0), _gen_actual,
+            acc_key="gen",
+        )
 
         # ── 계좌간 원금 조정 제안 ────────────────────────
         st.divider()

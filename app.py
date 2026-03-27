@@ -1776,6 +1776,8 @@ def calc_withdrawal_plan(
     general_weight: float,
     use_after_tax: bool,
     use_health_ins: bool,
+    ps_total: float = 0.0,
+    ps_weight: float = 0.0,
 ) -> dict:
     """
     목표 생활비를 충당하기 위한 계좌별 필요 인출액 역산.
@@ -1817,24 +1819,28 @@ def calc_withdrawal_plan(
             "irp_need_gross":   0.0,
             "isa_need_gross":   0.0,
             "gen_need_gross":   0.0,
+            "ps_need_gross":    0.0,
             "irp_rate_suggest": 0.0,
             "isa_rate_suggest": 0.0,
             "gen_rate_suggest": 0.0,
+            "ps_rate_suggest":  0.0,
             "total_net_est":    pub_net,
             "gap":              pub_net - target_monthly,
             "feasible":         True,
         }
 
     # 가중치 합 정규화
-    total_w = irp_weight + isa_weight + general_weight
+    total_w = irp_weight + isa_weight + general_weight + ps_weight
     if total_w <= 0:
         total_w = 1.0
         irp_weight = isa_weight = general_weight = 1/3
+        ps_weight = 0.0
 
     # 부족분을 가중치 비율로 각 계좌에 배분 (세후 목표)
     irp_need_net = shortage * (irp_weight / total_w)
     isa_need_net = shortage * (isa_weight / total_w)
     gen_need_net = shortage * (general_weight / total_w)
+    ps_need_net  = shortage * (ps_weight / total_w)
 
     # 세전 역산 (세금률 반영)
     irp_need_gross = irp_need_net / (1 - IRP_TAX_RATE)
@@ -1846,11 +1852,13 @@ def calc_withdrawal_plan(
             (isa_need_net - ISA_TAX_FREE_MONTHLY) / (1 - 0.099)
         )
     gen_need_gross = gen_need_net / (1 - 0.154)   # 배당소득세 15.4%
+    ps_need_gross  = ps_need_net  / (1 - PS_TAX_RATE)  # 연금소득세 5.5%
 
     # 분배율 역산 (원금 대비 %)
     irp_rate_s = (irp_need_gross / irp_total * 100) if irp_total > 0 else 0.0
     isa_rate_s = (isa_need_gross / isa_total * 100) if isa_total > 0 else 0.0
     gen_rate_s = (gen_need_gross / general_total * 100) if general_total > 0 else 0.0
+    ps_rate_s  = (ps_need_gross  / ps_total      * 100) if ps_total      > 0 else 0.0
 
     # 검증: 역산된 분배율로 실제 세후 합계
     irp_income_v = irp_total * (irp_rate_s / 100)
@@ -1867,9 +1875,11 @@ def calc_withdrawal_plan(
         "irp_need_gross":   irp_need_gross,
         "isa_need_gross":   isa_need_gross,
         "gen_need_gross":   gen_need_gross,
-        "irp_rate_suggest": min(irp_rate_s, 5.0),   # 월 5% 상한
+        "ps_need_gross":    ps_need_gross if ps_total > 0 else 0.0,
+        "irp_rate_suggest": min(irp_rate_s, 5.0),
         "isa_rate_suggest": min(isa_rate_s, 5.0),
         "gen_rate_suggest": min(gen_rate_s, 2.0),
+        "ps_rate_suggest":  min(ps_rate_s,  5.0) if ps_total > 0 else 0.0,
         "total_net_est":    total_net_v,
         "gap":              total_net_v - target_monthly,
         "feasible":         total_net_v >= target_monthly * 0.99,
@@ -2561,24 +2571,24 @@ with st.sidebar:
     irp_withdraw = st.number_input(
         "💼 IRP 월 인출액 (원)",
         min_value=0, max_value=_irp_max,
-        value=min(_irp_w_def, _irp_max), step=100_000, key="irp_withdraw",
+        value=min(_irp_w_def, _irp_max), step=50_000, key="irp_withdraw",
     )
     isa_withdraw = st.number_input(
         "📦 ISA 월 인출액 (원)",
         min_value=0, max_value=_isa_max,
-        value=min(_isa_w_def, _isa_max), step=100_000, key="isa_withdraw",
+        value=min(_isa_w_def, _isa_max), step=50_000, key="isa_withdraw",
     )
     _ps_w_def = int(_shortfall * 0.05 / 10000) * 10000
     _ps_max   = max(int(ps_total) if ps_total > 0 else 1_000_000, 1_000_000)
     ps_withdraw = st.number_input(
         "🏦 연금저축 월 인출액 (원)",
         min_value=0, max_value=_ps_max,
-        value=min(_ps_w_def, _ps_max), step=100_000, key="ps_withdraw",
+        value=min(_ps_w_def, _ps_max), step=50_000, key="ps_withdraw",
     )
     gen_withdraw = st.number_input(
         "💵 일반 월 인출액 (원)",
         min_value=0, max_value=_gen_max,
-        value=min(_gen_w_def, _gen_max), step=100_000, key="gen_withdraw",
+        value=min(_gen_w_def, _gen_max), step=50_000, key="gen_withdraw",
     )
     _total_withdraw = irp_withdraw + isa_withdraw + ps_withdraw + gen_withdraw
     _total_plan     = _pub_net_est + _total_withdraw
@@ -2812,6 +2822,8 @@ withdrawal_plan = calc_withdrawal_plan(
     general_weight   = float(gen_weight),
     use_after_tax    = show_tax,
     use_health_ins   = use_health_ins,
+    ps_total         = ps_total,
+    ps_weight        = float(ps_weight) if ps_total > 0 else 0.0,
 )
 
 
@@ -3034,7 +3046,12 @@ with _main_tab1:
                    delta_color="normal" if wp["gap"] >= 0 else "inverse")
 
         st.markdown("**각 계좌별 필요 인출액 및 권장 분배율**")
-        w1, w2, w3 = st.columns(3)
+        _has_ps_card = ps_total > 0
+        if _has_ps_card:
+            w1, w2, w3, w4 = st.columns(4)
+        else:
+            w1, w2, w3 = st.columns(3)
+            w4 = None
 
         # ── 수량·DPS 데이터 준비 — 시나리오 종목 우선 ────
         def _sc_shares_dps(acc_kr):
@@ -3214,6 +3231,13 @@ with _main_tab1:
             general_total, (_gen_monthly_income / general_total if general_total > 0 else 0), _gen_actual,
             acc_key="gen",
         )
+        if _has_ps_card and w4 is not None:
+            _withdrawal_card_v2(
+                w4, "🏦 연금저축", "#5DCAA5",
+                wp.get("ps_need_gross", 0.0), wp.get("ps_rate_suggest", 0.0),
+                ps_total, ps_rate, ps_income,
+                acc_key="ps",
+            )
 
         # ── 계좌간 원금 조정 제안 ────────────────────────
         st.divider()

@@ -2966,7 +2966,7 @@ if sc_choice != "기본 시트 현황" and sc_names:
 _main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5, _main_tab6 = st.tabs([
     "📊 현금흐름 대시보드", "📒 월별 가계부",
     "📈 보유종목", "🔍 관심종목",
-    "📐 수익률 벤치마크", "🎲 Monte Carlo",
+    "📐 수익률 벤치마크", "🎲 Monte Carlo", "🎲 Monte Carlo", "🤖 AI 자문"
 ])
 
 with _main_tab2:
@@ -4750,3 +4750,64 @@ with _main_tab6:
         gen_rate       = default_general / 12,
         birth_year     = 1971,
     )
+
+ADD_TO_END = '''
+# ════════════════════════════════════════════════════════
+# 🤖 AI 자문 탭
+# ════════════════════════════════════════════════════════
+with _main_tab7:
+    from pension_advisor import render_advisor_tab
+ 
+    # 타임라인 부족 구간 요약 (tl_df 가 이미 계산되어 있는 경우)
+    _shortage_summary = ""
+    try:
+        _s_df = tl_df[tl_df["잉여/부족"] < 0]
+        if not _s_df.empty:
+            _shortage_summary = (
+                f"{int(_s_df['연도'].min())}년({int(_s_df.iloc[0]['나이'])}세)~"
+                f"{int(_s_df['연도'].max())}년({int(_s_df.iloc[-1]['나이'])}세) "
+                f"총 {len(_s_df)}개년 부족 "
+                f"(최대 {_s_df['잉여/부족'].min()/10000:.0f}만원/월 부족)"
+            )
+    except Exception:
+        pass
+ 
+    _advisor_ctx = {
+        # 인적사항
+        "birth_year":      1971,
+        "retire_age":      retire_age,
+        "pension_age":     pension_age,
+ 
+        # 수입
+        "public_pension":  public_pension,
+        "irp_income":      irp_income,
+        "isa_income":      isa_income,
+        "ps_income":       ps_income,
+        "display_income":  display_income,
+        "total_income":    total_income,
+        "target_monthly":  target_monthly,
+        "achievement":     achievement,
+ 
+        # 자산
+        "irp_total":       irp_total,
+        "isa_total":       isa_total,
+        "ps_total":        ps_total,
+        "general_total":   general_total,
+ 
+        # 옵션
+        "show_tax":        show_tax,
+        "use_health_ins":  use_health_ins,
+        "sc_choice":       sc_choice,
+ 
+        # 보유 종목
+        "irp_names":       _irp_names,
+        "isa_names":       _isa_names,
+        "ps_names":        [r["종목명"] for r in _pension_ps_items if r.get("종목명")],
+        "gen_names":       _gen_names,
+ 
+        # 타임라인 부족 요약
+        "shortage_summary": _shortage_summary,
+    }
+ 
+    render_advisor_tab(_advisor_ctx)
+'''

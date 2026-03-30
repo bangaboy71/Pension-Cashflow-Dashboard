@@ -2963,9 +2963,10 @@ if sc_choice != "기본 시트 현황" and sc_names:
     )
 
 # ── 메인 탭 ──────────────────────────────────────────
-_main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5 = st.tabs([
+_main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5, _main_tab6 = st.tabs([
     "📊 현금흐름 대시보드", "📒 월별 가계부",
-    "📈 보유종목", "🔍 관심종목", "🎲 Monte Carlo",
+    "📈 보유종목", "🔍 관심종목",
+    "📐 수익률 벤치마크", "🎲 Monte Carlo",
 ])
 
 with _main_tab2:
@@ -4716,9 +4717,25 @@ with _main_tab1:
     )
 
 # ════════════════════════════════════════════════════════
-# 🎲 Monte Carlo 탭 (pension_montecarlo.py)
+# 📐 수익률 벤치마크 탭 (pension_benchmark.py)
 # ════════════════════════════════════════════════════════
 with _main_tab5:
+    from pension_benchmark import render_benchmark_tab
+    render_benchmark_tab(
+        irp_items = _pension_irp_items,
+        isa_items = _pension_isa_items,
+        ps_items  = _pension_ps_items,
+        gen_items = _pension_gen_items,
+        irp_total = irp_total,
+        isa_total = isa_total,
+        ps_total  = ps_total,
+        gen_total = general_total,
+    )
+
+# ════════════════════════════════════════════════════════
+# 🎲 Monte Carlo 탭 (pension_montecarlo.py)
+# ════════════════════════════════════════════════════════
+with _main_tab6:
     from pension_montecarlo import render_montecarlo_tab
     render_montecarlo_tab(
         irp_total      = irp_total,

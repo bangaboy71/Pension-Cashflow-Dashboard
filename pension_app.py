@@ -2963,10 +2963,11 @@ if sc_choice != "기본 시트 현황" and sc_names:
     )
 
 # ── 메인 탭 ──────────────────────────────────────────
-_main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5, _main_tab6 = st.tabs([
+_main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5, _main_tab6, _main_tab7 = st.tabs([
     "📊 현금흐름 대시보드", "📒 월별 가계부",
     "📈 보유종목", "🔍 관심종목",
-    "📐 수익률 벤치마크", "🎲 Monte Carlo", "🎲 Monte Carlo", "🤖 AI 자문"
+    "📐 수익률 벤치마크", "🎲 Monte Carlo",
+    "🤖 AI 자문",
 ])
 
 with _main_tab2:

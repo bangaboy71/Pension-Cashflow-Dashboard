@@ -474,15 +474,19 @@ def render_montecarlo_tab(
                   "연금저축": "#7dffb0", "일반": "#FF9999"}
     cumulative = np.zeros(len(ages))
 
+    def _hex_to_rgba(hex_color: str, alpha: float = 0.2) -> str:
+        h = hex_color.lstrip("#")
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return f"rgba({r},{g},{b},{alpha})"
+
     for acc, path in result["account_paths"].items():
-        color = acc_colors.get(acc, "#aaaaaa")
+        color  = acc_colors.get(acc, "#aaaaaa")
+        fill_c = _hex_to_rgba(color, 0.2)
         fig_acc.add_trace(go.Scatter(
             x=ages, y=(cumulative + path) / 1e8,
             name=acc, mode="lines",
             fill="tonexty" if any(cumulative) else "tozeroy",
-            fillcolor=color.replace("#", "rgba(").replace(
-                "rgba(", "rgba(") + ",0.2)" if "#" in color
-                else f"rgba(128,128,128,0.2)",
+            fillcolor=fill_c,
             line=dict(color=color, width=1),
             hovertemplate=f"{acc}: %{{y:.2f}}억원<extra></extra>",
         ))

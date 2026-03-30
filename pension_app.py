@@ -2965,7 +2965,7 @@ if sc_choice != "기본 시트 현황" and sc_names:
 # ── 메인 탭 ──────────────────────────────────────────
 _main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5 = st.tabs([
     "📊 현금흐름 대시보드", "📒 월별 가계부",
-    "📈 보유종목", "🔍 관심종목", "📐 수익률 벤치마크",
+    "📈 보유종목", "🔍 관심종목", "🎲 Monte Carlo",
 ])
 
 with _main_tab2:
@@ -4716,17 +4716,20 @@ with _main_tab1:
     )
 
 # ════════════════════════════════════════════════════════
-# 📐 수익률 벤치마크 탭 (pension_benchmark.py)
+# 🎲 Monte Carlo 탭 (pension_montecarlo.py)
 # ════════════════════════════════════════════════════════
 with _main_tab5:
-    from pension_benchmark import render_benchmark_tab
-    render_benchmark_tab(
-        irp_items = _pension_irp_items,
-        isa_items = _pension_isa_items,
-        ps_items  = _pension_ps_items,
-        gen_items = _pension_gen_items,
-        irp_total = irp_total,
-        isa_total = isa_total,
-        ps_total  = ps_total,
-        gen_total = general_total,
+    from pension_montecarlo import render_montecarlo_tab
+    render_montecarlo_tab(
+        irp_total      = irp_total,
+        isa_total      = isa_total,
+        ps_total       = ps_total,
+        gen_total      = general_total,
+        public_pension = public_pension,
+        target_monthly = target_monthly,
+        irp_rate       = default_palantir,
+        isa_rate       = default_kodex,
+        ps_rate        = default_ps,
+        gen_rate       = default_general / 12,
+        birth_year     = 1971,
     )

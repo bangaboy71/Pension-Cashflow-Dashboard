@@ -61,8 +61,21 @@ IRP_PENSION_PERSONAL_TAX = {  # 나이 → 세율(지방세 포함)
 
 
 
+"""
+household_tab_patch.py
+======================
+pension_app.py 의 _render_household_tab() 함수를 아래 버전으로 교체하세요.
+
+추가된 기능:
+  1. 월별 요약 카드 — 전월 대비 증감 delta 표시
+  2. 카테고리별 수입·지출 목록 — 전월 대비 증감 인라인 표시
+  3. [NEW] 카테고리별 월별 증감 추이 차트 (수입/지출 각각)
+  4. [NEW] 지출 카테고리 히트맵 — 월×카테고리 매트릭스
+  5. 기존 월별 추이·연간 누계·상세 내역 유지
+"""
+
 def _render_household_tab(
-    hh_df: pd.DataFrame,
+    hh_df,
     display_income: float,
     target_monthly: float,
     public_pension: float,
@@ -70,9 +83,13 @@ def _render_household_tab(
     isa_income: float,
     now_kst,
 ):
-    """월별 가계부 탭 렌더링"""
+    """월별 가계부 탭 렌더링 — 카테고리 월별 증감 모니터링 포함"""
     import calendar as _cal
     from datetime import datetime as _dt
+    import pandas as pd
+    import plotly.graph_objects as _go
+    import plotly.express as _px
+    import streamlit as st
 
     st.markdown("#### 📒 월별 가계부")
 
@@ -89,11 +106,8 @@ def _render_household_tab(
             "| 2026-04 | 지출 | 여행/여가 | 알프스 준비 | 500000 | |\n\n"
             "탭 생성 후 gid를 `HOUSEHOLD_SHEET_GID`에 입력하세요."
         )
-        # 시트 없어도 이번달 예상 수입 요약 표시
         st.divider()
         st.markdown("##### 📊 이번달 예상 수입 (시뮬레이션 기준)")
-        cur = _dt.now()
-        ym  = f"{cur.year}-{cur.month:02d}"
         _c1, _c2, _c3, _c4 = st.columns(4)
         _c1.metric("공무원연금", f"{public_pension:,.0f}원")
         _c2.metric("IRP 분배금", f"{irp_income:,.0f}원")
@@ -101,75 +115,124 @@ def _render_household_tab(
         _c4.metric("합계", f"{display_income:,.0f}원")
         return
 
-    # ── 연월 선택 ───────────────────────────────────────
+    # ════════════════════════════════════════════════════
+    # 공통 데이터 준비
+    # ════════════════════════════════════════════════════
+    hh_df = hh_df.copy()
+    hh_df["금액"] = pd.to_numeric(hh_df["금액"], errors="coerce").fillna(0)
+    hh_df["연월"] = hh_df["연월"].astype(str)
+
     all_ym = sorted(hh_df["연월"].unique(), reverse=True)
     cur_ym = f"{_dt.now().year}-{_dt.now().month:02d}"
-    default_idx = 0
-    if cur_ym in all_ym:
-        default_idx = all_ym.index(cur_ym)
+    default_idx = all_ym.index(cur_ym) if cur_ym in all_ym else 0
 
+    # 전월 계산
+    def _prev_ym(ym: str) -> str:
+        y, m = int(ym[:4]), int(ym[5:7])
+        m -= 1
+        if m == 0:
+            m, y = 12, y - 1
+        return f"{y}-{m:02d}"
+
+    # ── 연월 선택 ────────────────────────────────────────
     sel_col, _, _ = st.columns([2, 3, 3])
     sel_ym = sel_col.selectbox(
         "조회 연월", all_ym, index=default_idx, key="hh_ym_sel",
         label_visibility="collapsed",
     )
+    prev_ym = _prev_ym(sel_ym)
 
-    month_df = hh_df[hh_df["연월"] == sel_ym]
-    income_df = month_df[month_df["구분"] == "수입"]
+    month_df   = hh_df[hh_df["연월"] == sel_ym]
+    prev_df    = hh_df[hh_df["연월"] == prev_ym]
+    income_df  = month_df[month_df["구분"] == "수입"]
     expense_df = month_df[month_df["구분"] == "지출"]
+    prev_inc   = prev_df[prev_df["구분"] == "수입"]
+    prev_exp   = prev_df[prev_df["구분"] == "지출"]
 
     total_income_hh  = income_df["금액"].sum()
     total_expense_hh = expense_df["금액"].sum()
     balance          = total_income_hh - total_expense_hh
-    bal_color        = "#7dffb0" if balance >= 0 else "#FF4B4B"
+    prev_income_tot  = prev_inc["금액"].sum()
+    prev_expense_tot = prev_exp["금액"].sum()
+    prev_balance     = prev_income_tot - prev_expense_tot
 
-    # ── 월별 요약 카드 ────────────────────────────────────
+    # ════════════════════════════════════════════════════
+    # 1. 월별 요약 카드 (전월 대비 delta 포함)
+    # ════════════════════════════════════════════════════
     mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric("총 수입",   f"{total_income_hh:,.0f}원")
-    mc2.metric("총 지출",   f"{total_expense_hh:,.0f}원")
-    mc3.metric("잉여/부족", f"{balance:+,.0f}원",
-               delta_color="normal" if balance >= 0 else "inverse")
-    mc4.metric("목표 대비",
-               f"{(total_income_hh/target_monthly*100) if target_monthly > 0 else 0:.0f}%",
-               help="이번달 총 수입 ÷ 목표 생활비")
+    mc1.metric(
+        "총 수입", f"{total_income_hh:,.0f}원",
+        delta=f"{total_income_hh - prev_income_tot:+,.0f}원" if prev_income_tot else None,
+    )
+    mc2.metric(
+        "총 지출", f"{total_expense_hh:,.0f}원",
+        delta=f"{total_expense_hh - prev_expense_tot:+,.0f}원" if prev_expense_tot else None,
+        delta_color="inverse",
+    )
+    mc3.metric(
+        "잉여/부족", f"{balance:+,.0f}원",
+        delta=f"{balance - prev_balance:+,.0f}원" if prev_balance else None,
+        delta_color="normal" if balance >= 0 else "inverse",
+    )
+    mc4.metric(
+        "목표 대비",
+        f"{(total_income_hh / target_monthly * 100) if target_monthly > 0 else 0:.0f}%",
+        help="이번달 총 수입 ÷ 목표 생활비",
+    )
 
     st.divider()
+
+    # ════════════════════════════════════════════════════
+    # 2. 수입·지출 카테고리 내역 (전월 대비 증감 포함)
+    # ════════════════════════════════════════════════════
     left_col, right_col = st.columns(2)
 
-    # ── 수입 내역 ─────────────────────────────────────────
+    def _delta_badge(cur_val: float, prev_val: float, is_expense: bool = False) -> str:
+        """전월 대비 증감 뱃지 HTML"""
+        if prev_val == 0:
+            return ""
+        diff = cur_val - prev_val
+        pct  = diff / prev_val * 100
+        # 지출은 증가가 나쁨(빨강), 수입은 증가가 좋음(초록)
+        if is_expense:
+            color = "#FF4B4B" if diff > 0 else "#7dffb0"
+        else:
+            color = "#7dffb0" if diff > 0 else "#FF4B4B"
+        arrow = "▲" if diff > 0 else "▼"
+        return (
+            f"<span style='font-size:0.75rem; color:{color}; margin-left:6px;'>"
+            f"{arrow} {abs(diff)/10000:.1f}만 ({pct:+.1f}%)</span>"
+        )
+
+    # ── 수입 내역 ────────────────────────────────────────
     with left_col:
         st.markdown("**💰 수입 내역**")
         if not income_df.empty:
-            inc_by_cat = income_df.groupby("카테고리")["금액"].sum().reset_index()
+            inc_by_cat  = income_df.groupby("카테고리")["금액"].sum().reset_index()
+            prev_inc_cat = prev_inc.groupby("카테고리")["금액"].sum().to_dict() if not prev_inc.empty else {}
             for _, row in inc_by_cat.iterrows():
+                badge = _delta_badge(row["금액"], prev_inc_cat.get(row["카테고리"], 0), False)
                 st.markdown(
-                    f"<div style='display:flex; justify-content:space-between; "
-                    f"padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.05); "
-                    f"font-size:0.88rem;'>"
+                    f"<div style='display:flex; justify-content:space-between; align-items:center;"
+                    f"padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.05); font-size:0.88rem;'>"
                     f"<span style='color:rgba(255,255,255,0.7);'>{row['카테고리']}</span>"
-                    f"<span style='color:#7dffb0; font-weight:600;'>{row['금액']:,.0f}원</span>"
-                    f"</div>",
+                    f"<span><span style='color:#7dffb0; font-weight:600;'>{row['금액']:,.0f}원</span>"
+                    f"{badge}</span></div>",
                     unsafe_allow_html=True,
                 )
             st.markdown(
-                f"<div style='display:flex; justify-content:space-between; "
-                f"padding:6px 0; font-size:0.9rem; font-weight:700; margin-top:4px;'>"
+                f"<div style='display:flex; justify-content:space-between; padding:6px 0;"
+                f"font-size:0.9rem; font-weight:700; margin-top:4px;'>"
                 f"<span>합계</span>"
-                f"<span style='color:#7dffb0;'>{total_income_hh:,.0f}원</span>"
-                f"</div>",
+                f"<span style='color:#7dffb0;'>{total_income_hh:,.0f}원</span></div>",
                 unsafe_allow_html=True,
             )
-            # 수입 도넛 차트
-            import plotly.express as _px
             fig_inc = _px.pie(
-                inc_by_cat, values="금액", names="카테고리",
-                hole=0.45,
-                color_discrete_sequence=["#7dffb0","#87CEEB","#FFD700",
-                                          "#AFA9EC","#FF8C00","#5DCAA5"],
+                inc_by_cat, values="금액", names="카테고리", hole=0.45,
+                color_discrete_sequence=["#7dffb0","#87CEEB","#FFD700","#AFA9EC","#FF8C00","#5DCAA5"],
             )
             fig_inc.update_layout(
-                height=240, paper_bgcolor="rgba(0,0,0,0)",
-                font_color="white", showlegend=True,
+                height=220, paper_bgcolor="rgba(0,0,0,0)", font_color="white",
                 legend=dict(orientation="h", y=-0.2, xanchor="center", x=0.5),
                 margin=dict(t=10, b=60, l=0, r=0),
             )
@@ -177,40 +240,35 @@ def _render_household_tab(
         else:
             st.caption("수입 내역 없음")
 
-    # ── 지출 내역 ─────────────────────────────────────────
+    # ── 지출 내역 ────────────────────────────────────────
     with right_col:
         st.markdown("**💸 지출 내역**")
         if not expense_df.empty:
-            exp_by_cat = expense_df.groupby("카테고리")["금액"].sum().reset_index()                                    .sort_values("금액", ascending=False)
+            exp_by_cat  = expense_df.groupby("카테고리")["금액"].sum().reset_index().sort_values("금액", ascending=False)
+            prev_exp_cat = prev_exp.groupby("카테고리")["금액"].sum().to_dict() if not prev_exp.empty else {}
             for _, row in exp_by_cat.iterrows():
+                badge = _delta_badge(row["금액"], prev_exp_cat.get(row["카테고리"], 0), True)
                 st.markdown(
-                    f"<div style='display:flex; justify-content:space-between; "
-                    f"padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.05); "
-                    f"font-size:0.88rem;'>"
+                    f"<div style='display:flex; justify-content:space-between; align-items:center;"
+                    f"padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.05); font-size:0.88rem;'>"
                     f"<span style='color:rgba(255,255,255,0.7);'>{row['카테고리']}</span>"
-                    f"<span style='color:#FF4B4B; font-weight:600;'>{row['금액']:,.0f}원</span>"
-                    f"</div>",
+                    f"<span><span style='color:#FF4B4B; font-weight:600;'>{row['금액']:,.0f}원</span>"
+                    f"{badge}</span></div>",
                     unsafe_allow_html=True,
                 )
             st.markdown(
-                f"<div style='display:flex; justify-content:space-between; "
-                f"padding:6px 0; font-size:0.9rem; font-weight:700; margin-top:4px;'>"
+                f"<div style='display:flex; justify-content:space-between; padding:6px 0;"
+                f"font-size:0.9rem; font-weight:700; margin-top:4px;'>"
                 f"<span>합계</span>"
-                f"<span style='color:#FF4B4B;'>{total_expense_hh:,.0f}원</span>"
-                f"</div>",
+                f"<span style='color:#FF4B4B;'>{total_expense_hh:,.0f}원</span></div>",
                 unsafe_allow_html=True,
             )
-            # 지출 도넛 차트
-            import plotly.express as _px
             fig_d = _px.pie(
-                exp_by_cat, values="금액", names="카테고리",
-                hole=0.45,
-                color_discrete_sequence=["#87CEEB","#FFD700","#FF4B4B",
-                                          "#7dffb0","#AFA9EC","#FF8C00"],
+                exp_by_cat, values="금액", names="카테고리", hole=0.45,
+                color_discrete_sequence=["#87CEEB","#FFD700","#FF4B4B","#7dffb0","#AFA9EC","#FF8C00"],
             )
             fig_d.update_layout(
-                height=240, paper_bgcolor="rgba(0,0,0,0)",
-                font_color="white", showlegend=True,
+                height=220, paper_bgcolor="rgba(0,0,0,0)", font_color="white",
                 legend=dict(orientation="h", y=-0.2, xanchor="center", x=0.5),
                 margin=dict(t=10, b=60, l=0, r=0),
             )
@@ -218,7 +276,139 @@ def _render_household_tab(
         else:
             st.caption("지출 내역 없음")
 
-    # ── 월별 수입/지출 추이 차트 ─────────────────────────
+    # ════════════════════════════════════════════════════
+    # 3. 카테고리별 월별 증감 추이 차트 [NEW]
+    # ════════════════════════════════════════════════════
+    st.divider()
+    st.markdown("#### 📊 카테고리별 월별 증감 추이")
+
+    # 최근 N개월 선택
+    n_months = st.select_slider(
+        "조회 기간", options=[3, 6, 9, 12], value=6, key="hh_trend_months",
+        format_func=lambda x: f"최근 {x}개월",
+    )
+    recent_yms = sorted(hh_df["연월"].unique())[-n_months:]
+    trend_df   = hh_df[hh_df["연월"].isin(recent_yms)]
+
+    trend_tab_inc, trend_tab_exp = st.tabs(["💰 수입 카테고리 추이", "💸 지출 카테고리 추이"])
+
+    # ── 수입 카테고리 추이 ────────────────────────────────
+    with trend_tab_inc:
+        inc_trend = (
+            trend_df[trend_df["구분"] == "수입"]
+            .groupby(["연월", "카테고리"])["금액"]
+            .sum()
+            .reset_index()
+        )
+        if not inc_trend.empty:
+            cats = inc_trend["카테고리"].unique()
+            COLORS = ["#7dffb0","#87CEEB","#FFD700","#AFA9EC","#FF8C00","#5DCAA5","#C8A8E9"]
+            fig_it = _go.Figure()
+            for i, cat in enumerate(cats):
+                d = inc_trend[inc_trend["카테고리"] == cat].set_index("연월").reindex(recent_yms, fill_value=0).reset_index()
+                fig_it.add_trace(_go.Scatter(
+                    x=d["연월"], y=d["금액"] / 10000,
+                    name=cat, mode="lines+markers",
+                    line=dict(color=COLORS[i % len(COLORS)], width=2),
+                    marker=dict(size=6),
+                    hovertemplate=f"{cat}: %{{y:.1f}}만원<extra></extra>",
+                ))
+            fig_it.update_layout(
+                height=300, paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(255,255,255,0.02)", font_color="white",
+                legend=dict(orientation="h", y=-0.3, xanchor="center", x=0.5),
+                margin=dict(t=10, b=80, l=10, r=10),
+                yaxis=dict(title="금액 (만원)", tickformat=","),
+                xaxis=dict(tickangle=-30), hovermode="x unified",
+            )
+            st.plotly_chart(fig_it, use_container_width=True)
+
+            # 전월 대비 증감 테이블
+            inc_pivot = inc_trend.pivot_table(index="카테고리", columns="연월", values="금액", aggfunc="sum", fill_value=0)
+            _show_mom_table(inc_pivot, recent_yms, is_expense=False)
+        else:
+            st.caption("수입 데이터 없음")
+
+    # ── 지출 카테고리 추이 ────────────────────────────────
+    with trend_tab_exp:
+        exp_trend = (
+            trend_df[trend_df["구분"] == "지출"]
+            .groupby(["연월", "카테고리"])["금액"]
+            .sum()
+            .reset_index()
+        )
+        if not exp_trend.empty:
+            cats_e = exp_trend["카테고리"].unique()
+            COLORS_E = ["#FF4B4B","#FFD700","#87CEEB","#AFA9EC","#FF8C00","#7dffb0","#C8A8E9"]
+            fig_et = _go.Figure()
+            for i, cat in enumerate(cats_e):
+                d = exp_trend[exp_trend["카테고리"] == cat].set_index("연월").reindex(recent_yms, fill_value=0).reset_index()
+                fig_et.add_trace(_go.Scatter(
+                    x=d["연월"], y=d["금액"] / 10000,
+                    name=cat, mode="lines+markers",
+                    line=dict(color=COLORS_E[i % len(COLORS_E)], width=2),
+                    marker=dict(size=6),
+                    hovertemplate=f"{cat}: %{{y:.1f}}만원<extra></extra>",
+                ))
+            fig_et.update_layout(
+                height=300, paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(255,255,255,0.02)", font_color="white",
+                legend=dict(orientation="h", y=-0.3, xanchor="center", x=0.5),
+                margin=dict(t=10, b=80, l=10, r=10),
+                yaxis=dict(title="금액 (만원)", tickformat=","),
+                xaxis=dict(tickangle=-30), hovermode="x unified",
+            )
+            st.plotly_chart(fig_et, use_container_width=True)
+
+            exp_pivot = exp_trend.pivot_table(index="카테고리", columns="연월", values="금액", aggfunc="sum", fill_value=0)
+            _show_mom_table(exp_pivot, recent_yms, is_expense=True)
+        else:
+            st.caption("지출 데이터 없음")
+
+    # ════════════════════════════════════════════════════
+    # 4. 지출 카테고리 히트맵 [NEW]
+    # ════════════════════════════════════════════════════
+    st.divider()
+    st.markdown("#### 🗓️ 지출 카테고리 히트맵")
+    st.caption("월×카테고리 지출 패턴 — 색이 진할수록 지출 多")
+
+    hm_exp = (
+        hh_df[hh_df["구분"] == "지출"]
+        .groupby(["연월", "카테고리"])["금액"]
+        .sum()
+        .reset_index()
+    )
+    if not hm_exp.empty:
+        hm_pivot = hm_exp.pivot_table(index="연월", columns="카테고리", values="금액", fill_value=0)
+        hm_pivot = hm_pivot.sort_index()
+
+        fig_hm = _go.Figure(_go.Heatmap(
+            z=hm_pivot.values / 10000,
+            x=hm_pivot.columns.tolist(),
+            y=hm_pivot.index.tolist(),
+            colorscale=[
+                [0.0, "#1a1a2e"], [0.3, "#16213e"],
+                [0.6, "#c0392b"], [1.0, "#FF4B4B"],
+            ],
+            hovertemplate="%{y} %{x}: %{z:.1f}만원<extra></extra>",
+            showscale=True,
+            colorbar=dict(title=dict(text="만원"), tickfont=dict(color="rgba(255,255,255,0.6)", size=10), thickness=12),
+            xgap=2, ygap=2,
+        ))
+        fig_hm.update_layout(
+            height=max(250, len(hm_pivot) * 28 + 80),
+            paper_bgcolor="rgba(0,0,0,0)", font_color="white",
+            margin=dict(t=20, b=40, l=10, r=80),
+            xaxis=dict(tickfont=dict(size=11), side="top", tickangle=-30),
+            yaxis=dict(tickfont=dict(size=11), autorange="reversed"),
+        )
+        st.plotly_chart(fig_hm, use_container_width=True)
+    else:
+        st.caption("지출 데이터 없음")
+
+    # ════════════════════════════════════════════════════
+    # 5. 기존: 월별 수입·지출 추이 바 차트
+    # ════════════════════════════════════════════════════
     st.divider()
     st.markdown("**📈 월별 수입·지출 추이**")
     monthly_hh = hh_df.groupby(["연월","구분"])["금액"].sum().unstack(fill_value=0).reset_index()
@@ -226,41 +416,24 @@ def _render_household_tab(
     if "지출" not in monthly_hh.columns: monthly_hh["지출"] = 0
     monthly_hh["잉여"] = monthly_hh["수입"] - monthly_hh["지출"]
 
-    import plotly.graph_objects as _go
     fig_trend = _go.Figure()
-    fig_trend.add_trace(_go.Bar(
-        x=monthly_hh["연월"], y=monthly_hh["수입"]/10000,
-        name="수입", marker_color="rgba(125,255,176,0.7)",
-    ))
-    fig_trend.add_trace(_go.Bar(
-        x=monthly_hh["연월"], y=monthly_hh["지출"]/10000,
-        name="지출", marker_color="rgba(255,75,75,0.7)",
-    ))
-    fig_trend.add_trace(_go.Scatter(
-        x=monthly_hh["연월"], y=monthly_hh["잉여"]/10000,
-        name="잉여/부족", mode="lines+markers",
-        line=dict(color="#FFD700", width=2),
-    ))
-    fig_trend.add_hline(
-        y=target_monthly/10000, line_dash="dot",
-        line_color="rgba(255,255,255,0.3)", line_width=1,
-        annotation_text=f"목표 {target_monthly/10000:.0f}만",
-        annotation_font_color="rgba(255,255,255,0.4)",
-    )
+    fig_trend.add_trace(_go.Bar(x=monthly_hh["연월"], y=monthly_hh["수입"]/10000, name="수입", marker_color="rgba(125,255,176,0.7)"))
+    fig_trend.add_trace(_go.Bar(x=monthly_hh["연월"], y=monthly_hh["지출"]/10000, name="지출", marker_color="rgba(255,75,75,0.7)"))
+    fig_trend.add_trace(_go.Scatter(x=monthly_hh["연월"], y=monthly_hh["잉여"]/10000, name="잉여/부족", mode="lines+markers", line=dict(color="#FFD700", width=2)))
+    fig_trend.add_hline(y=target_monthly/10000, line_dash="dot", line_color="rgba(255,255,255,0.3)", line_width=1,
+                        annotation_text=f"목표 {target_monthly/10000:.0f}만", annotation_font_color="rgba(255,255,255,0.4)")
     fig_trend.update_layout(
-        barmode="group", height=300,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(255,255,255,0.02)",
-        font_color="white",
+        barmode="group", height=300, paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(255,255,255,0.02)", font_color="white",
         legend=dict(orientation="h", y=-0.25, xanchor="center", x=0.5),
         margin=dict(t=10, b=70, l=10, r=10),
-        yaxis=dict(title="만원", tickformat=","),
-        xaxis=dict(tickangle=-30),
-        hovermode="x unified",
+        yaxis=dict(title="만원", tickformat=","), xaxis=dict(tickangle=-30), hovermode="x unified",
     )
     st.plotly_chart(fig_trend, use_container_width=True)
 
-    # ── 연간 누계 테이블 ─────────────────────────────────
+    # ════════════════════════════════════════════════════
+    # 6. 기존: 연간 누계 + 상세 내역
+    # ════════════════════════════════════════════════════
     st.divider()
     st.markdown("**📆 연간 누계**")
     hh_df["연도"] = hh_df["연월"].str[:4]
@@ -270,6 +443,7 @@ def _render_household_tab(
     annual_hh["잉여"] = annual_hh["수입"] - annual_hh["지출"]
     for col in ["수입","지출","잉여"]:
         annual_hh[col] = (annual_hh[col]/10000).round(1)
+    import streamlit as st
     st.dataframe(
         annual_hh.rename(columns={"수입":"수입(만원)","지출":"지출(만원)","잉여":"잉여(만원)"}),
         hide_index=True, use_container_width=True,
@@ -280,18 +454,64 @@ def _render_household_tab(
         },
     )
 
-    # ── 이번달 상세 내역 ─────────────────────────────────
     with st.expander("📋 이번달 상세 내역"):
         disp = month_df[["구분","카테고리","항목","금액"] +
                         (["비고"] if "비고" in month_df.columns else [])].copy()
         disp["금액"] = disp["금액"].apply(lambda x: f"{x:,.0f}")
         st.dataframe(disp, hide_index=True, use_container_width=True)
 
-    # ── 실지급 실적 연동 ─────────────────────────────────
     st.divider()
     _render_actual_section(url=_SHEET_URL_REF, target_monthly=target_monthly)
 
 
+# ════════════════════════════════════════════════════════
+# 헬퍼: 전월 대비 증감 테이블
+# ════════════════════════════════════════════════════════
+def _show_mom_table(pivot, recent_yms, is_expense: bool = False):
+    """카테고리 × 연월 피벗 → 전월 대비 증감 포함 st.dataframe 출력"""
+    import pandas as pd
+    import streamlit as st
+
+    cols = [c for c in recent_yms if c in pivot.columns]
+    if len(cols) < 2:
+        return
+
+    rows = []
+    for cat in pivot.index:
+        row = {"카테고리": cat}
+        for i, ym in enumerate(cols):
+            val  = pivot.loc[cat, ym]
+            row[ym] = val / 10000  # 만원 단위
+            if i > 0:
+                prev_val = pivot.loc[cat, cols[i-1]]
+                diff = val - prev_val
+                row[f"{ym}_증감"] = diff / 10000
+        rows.append(row)
+
+    df_out = pd.DataFrame(rows)
+
+    # 컬럼 설정
+    col_cfg = {"카테고리": st.column_config.TextColumn("카테고리", width="medium")}
+    for ym in cols:
+        col_cfg[ym] = st.column_config.NumberColumn(ym, format="%.1f만")
+        if f"{ym}_증감" in df_out.columns:
+            col_cfg[f"{ym}_증감"] = st.column_config.NumberColumn(
+                f"▲▼ {ym}", format="%+.1f만",
+                help="전월 대비 증감 (만원)",
+            )
+
+    display_cols = ["카테고리"]
+    for ym in cols:
+        display_cols.append(ym)
+        if f"{ym}_증감" in df_out.columns:
+            display_cols.append(f"{ym}_증감")
+
+    st.dataframe(
+        df_out[display_cols],
+        hide_index=True,
+        use_container_width=True,
+        column_config=col_cfg,
+    )
 # 실적 탭 URL 참조용 (함수 내부에서 SHEET_URL 접근)
 _SHEET_URL_REF = SHEET_URL
 

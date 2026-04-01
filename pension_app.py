@@ -305,7 +305,7 @@ def _render_household_tab(
             COLORS = ["#7dffb0","#87CEEB","#FFD700","#AFA9EC","#FF8C00","#5DCAA5","#C8A8E9"]
             fig_it = _go.Figure()
             for i, cat in enumerate(cats):
-                d = inc_trend[inc_trend["카테고리"] == cat].set_index("연월").reindex(recent_yms, fill_value=0).reset_index()
+                d = inc_trend[inc_trend["카테고리"] == cat].set_index("연월").reindex(recent_yms).fillna(0).reset_index()
                 fig_it.add_trace(_go.Scatter(
                     x=d["연월"], y=d["금액"] / 10000,
                     name=cat, mode="lines+markers",
@@ -342,7 +342,7 @@ def _render_household_tab(
             COLORS_E = ["#FF4B4B","#FFD700","#87CEEB","#AFA9EC","#FF8C00","#7dffb0","#C8A8E9"]
             fig_et = _go.Figure()
             for i, cat in enumerate(cats_e):
-                d = exp_trend[exp_trend["카테고리"] == cat].set_index("연월").reindex(recent_yms, fill_value=0).reset_index()
+                d = exp_trend[exp_trend["카테고리"] == cat].set_index("연월").reindex(recent_yms).fillna(0).reset_index()
                 fig_et.add_trace(_go.Scatter(
                     x=d["연월"], y=d["금액"] / 10000,
                     name=cat, mode="lines+markers",

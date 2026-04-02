@@ -731,6 +731,22 @@ def load_dist_tax_sheet(url: str, gid: str) -> pd.DataFrame:
                 df[col] = pd.to_numeric(
                     df[col].astype(str).str.replace(",",""), errors="coerce"
                 ).fillna(0)
+
+        # ── 연월 형식 정규화: 날짜/Timestamp → "YYYY-MM" 문자열 ──
+        # 시트에 "2026-04-01", datetime 등 다양한 형식이 올 수 있음
+        if "연월" in df.columns:
+            import pandas as _pd
+            def _to_ym(v):
+                try:
+                    return _pd.to_datetime(v).strftime("%Y-%m")
+                except Exception:
+                    s = str(v).strip()
+                    # 이미 YYYY-MM 형식이면 그대로
+                    if len(s) >= 7:
+                        return s[:7]
+                    return s
+            df["연월"] = df["연월"].apply(_to_ym)
+
         return df
     except Exception:
         return pd.DataFrame()

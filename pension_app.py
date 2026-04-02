@@ -61,19 +61,6 @@ IRP_PENSION_PERSONAL_TAX = {  # 나이 → 세율(지방세 포함)
 
 
 
-"""
-household_tab_patch.py
-======================
-pension_app.py 의 _render_household_tab() 함수를 아래 버전으로 교체하세요.
-
-추가된 기능:
-  1. 월별 요약 카드 — 전월 대비 증감 delta 표시
-  2. 카테고리별 수입·지출 목록 — 전월 대비 증감 인라인 표시
-  3. [NEW] 카테고리별 월별 증감 추이 차트 (수입/지출 각각)
-  4. [NEW] 지출 카테고리 히트맵 — 월×카테고리 매트릭스
-  5. 기존 월별 추이·연간 누계·상세 내역 유지
-"""
-
 def _render_household_tab(
     hh_df,
     display_income: float,

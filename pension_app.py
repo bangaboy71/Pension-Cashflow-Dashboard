@@ -60,6 +60,20 @@ IRP_PENSION_PERSONAL_TAX = {  # 나이 → 세율(지방세 포함)
 
 
 
+
+"""
+household_tab_patch.py
+======================
+pension_app.py 의 _render_household_tab() 함수를 아래 버전으로 교체하세요.
+
+추가된 기능:
+  1. 월별 요약 카드 — 전월 대비 증감 delta 표시
+  2. 카테고리별 수입·지출 목록 — 전월 대비 증감 인라인 표시
+  3. [NEW] 카테고리별 월별 증감 추이 차트 (수입/지출 각각)
+  4. [NEW] 지출 카테고리 히트맵 — 월×카테고리 매트릭스
+  5. 기존 월별 추이·연간 누계·상세 내역 유지
+"""
+
 def _render_household_tab(
     hh_df,
     display_income: float,
@@ -2736,6 +2750,18 @@ with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as
     except Exception:
         wl_df = pd.DataFrame()
 
+    # ── 분배금과세 시트 로드 ──────────────────────────────
+    @st.cache_data(ttl=DATA_TTL, show_spinner=False)
+    def _load_dist_tax(url: str, gid: str) -> pd.DataFrame:
+        from pension_tax_monitor import load_dist_tax_sheet
+        return load_dist_tax_sheet(url, gid)
+
+    _dist_tax_gid = st.secrets.get("DIST_TAX_SHEET_GID", "")
+    try:
+        dist_tax_df = _load_dist_tax(SHEET_URL, _dist_tax_gid)
+    except Exception:
+        dist_tax_df = pd.DataFrame()
+
     st.write("✨ 준비 완료...")
     _cache_info = (
         "🔄 새로 로드됨"
@@ -3169,11 +3195,11 @@ if sc_choice != "기본 시트 현황" and sc_names:
     )
 
 # ── 메인 탭 ──────────────────────────────────────────
-_main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5, _main_tab6, _main_tab7 = st.tabs([
+_main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5, _main_tab6, _main_tab7, _main_tab8 = st.tabs([
     "📊 현금흐름 대시보드", "📒 월별 가계부",
     "📈 보유종목", "🔍 관심종목",
     "📐 수익률 벤치마크", "🎲 Monte Carlo",
-    "🤖 AI 자문",
+    "🤖 AI 자문", "🏦 과세관리",
 ])
 
 with _main_tab2:
@@ -5003,3 +5029,23 @@ with _main_tab7:
     }
 
     render_advisor_tab(_advisor_ctx)
+
+
+# ════════════════════════════════════════════════════════
+# 🏦 과세 관리 탭
+# ════════════════════════════════════════════════════════
+with _main_tab8:
+    from pension_tax_monitor import render_tax_monitor_tab
+
+    _tax_ctx = {
+        "dist_df":        dist_tax_df,
+        "year":           datetime.now().year,
+        "current_month":  datetime.now().month,
+        "irp_monthly":    irp_income,
+        "isa_monthly":    isa_income,
+        "gen_monthly":    _gen_monthly_income,
+        "ps_monthly":     ps_income,
+        "target_monthly": target_monthly,
+    }
+
+    render_tax_monitor_tab(_tax_ctx)

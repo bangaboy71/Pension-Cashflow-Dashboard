@@ -94,13 +94,26 @@ def calc_taxable_income(
         ISA          → 200만원 비과세, 초과분 9.9% 분리과세
         일반         → 금융소득 종합과세 대상 (2,000만원 초과 시 종합)
     """
-    yr_df = dist_df[dist_df["연월"].str.startswith(str(year))].copy()
+    # ── 필수 컬럼 검증 ───────────────────────────────────
+    required = ["연월", "분배금(원)"]
+    if any(c not in dist_df.columns for c in required):
+        return _empty_tax_result(year)
+
+    yr_df = dist_df[dist_df["연월"].astype(str).str.startswith(str(year))].copy()
     if yr_df.empty:
         return _empty_tax_result(year)
 
-    yr_df["과세표준(원)"] = pd.to_numeric(yr_df.get("과세표준(원)", yr_df.get("분배금(원)", 0)), errors="coerce").fillna(0)
-    yr_df["분배금(원)"]   = pd.to_numeric(yr_df["분배금(원)"], errors="coerce").fillna(0)
-    yr_df["비과세(원)"]   = pd.to_numeric(yr_df.get("비과세(원)", 0), errors="coerce").fillna(0)
+    # 선택 컬럼 없으면 기본값으로 채움
+    if "계좌" not in yr_df.columns:
+        yr_df["계좌"] = "IRP"
+    if "과세표준(원)" not in yr_df.columns:
+        yr_df["과세표준(원)"] = yr_df["분배금(원)"]
+    if "비과세(원)" not in yr_df.columns:
+        yr_df["비과세(원)"] = 0
+
+    yr_df["과세표준(원)"] = pd.to_numeric(yr_df["과세표준(원)"], errors="coerce").fillna(0)
+    yr_df["분배금(원)"]   = pd.to_numeric(yr_df["분배금(원)"],   errors="coerce").fillna(0)
+    yr_df["비과세(원)"]   = pd.to_numeric(yr_df["비과세(원)"],   errors="coerce").fillna(0)
 
     # 계좌별 집계
     irp_ps   = yr_df[yr_df["계좌"].isin(["IRP","연금저축"])]["과세표준(원)"].sum()
@@ -148,12 +161,21 @@ def _empty_tax_result(year: int) -> dict:
 
 def calc_monthly_cumulative(dist_df: pd.DataFrame, year: int) -> pd.DataFrame:
     """월별 누적 과세표준 DataFrame 반환"""
-    yr_df = dist_df[dist_df["연월"].str.startswith(str(year))].copy()
+    # 필수 컬럼 검증
+    if "연월" not in dist_df.columns or "분배금(원)" not in dist_df.columns:
+        return pd.DataFrame()
+
+    yr_df = dist_df[dist_df["연월"].astype(str).str.startswith(str(year))].copy()
     if yr_df.empty:
         return pd.DataFrame()
 
-    yr_df["과세표준(원)"] = pd.to_numeric(yr_df.get("과세표준(원)", yr_df.get("분배금(원)", 0)), errors="coerce").fillna(0)
-    yr_df["분배금(원)"]   = pd.to_numeric(yr_df["분배금(원)"], errors="coerce").fillna(0)
+    if "계좌" not in yr_df.columns:
+        yr_df["계좌"] = "IRP"
+    if "과세표준(원)" not in yr_df.columns:
+        yr_df["과세표준(원)"] = yr_df["분배금(원)"]
+
+    yr_df["과세표준(원)"] = pd.to_numeric(yr_df["과세표준(원)"], errors="coerce").fillna(0)
+    yr_df["분배금(원)"]   = pd.to_numeric(yr_df["분배금(원)"],   errors="coerce").fillna(0)
 
     monthly = yr_df.groupby(["연월","계좌"]).agg(
         과세표준=("과세표준(원)", "sum"),
@@ -257,6 +279,11 @@ def render_tax_monitor_tab(tax_ctx: dict) -> None:
     # ════════════════════════════════════════════════════
     # A. 시트 데이터 없는 경우: 현재 수치 기반 추산 모드
     # ════════════════════════════════════════════════════
+    # 필수 컬럼(연월, 분배금(원)) 없으면 추산 모드로 전환
+    _required_cols = ["연월", "분배금(원)"]
+    if dist_df.empty or any(c not in dist_df.columns for c in _required_cols):
+        dist_df = pd.DataFrame()  # 추산 모드 강제 전환
+
     if dist_df.empty:
         st.info(
             "📋 **분배금 과세 시트가 연결되지 않았습니다.** 현재 월 수치로 연간 추산합니다.\n\n"
@@ -433,10 +460,16 @@ def render_tax_monitor_tab(tax_ctx: dict) -> None:
         st.divider()
         st.markdown("#### 📋 종목별 월별 과세표준 상세")
 
-        yr_df = dist_df[dist_df["연월"].str.startswith(str(sel_year))].copy()
-        yr_df["과세표준(원)"] = pd.to_numeric(yr_df.get("과세표준(원)", yr_df.get("분배금(원)", 0)), errors="coerce").fillna(0)
-        yr_df["분배금(원)"]   = pd.to_numeric(yr_df["분배금(원)"], errors="coerce").fillna(0)
-        yr_df["과세비율(%)"]  = (yr_df["과세표준(원)"] / yr_df["분배금(원)"] * 100).fillna(0).round(1)
+        yr_df = dist_df[dist_df["연월"].astype(str).str.startswith(str(sel_year))].copy()
+        if "계좌" not in yr_df.columns:
+            yr_df["계좌"] = "IRP"
+        if "종목명" not in yr_df.columns:
+            yr_df["종목명"] = "미입력"
+        if "과세표준(원)" not in yr_df.columns:
+            yr_df["과세표준(원)"] = yr_df["분배금(원)"] if "분배금(원)" in yr_df.columns else 0
+        yr_df["분배금(원)"]   = pd.to_numeric(yr_df.get("분배금(원)", 0),   errors="coerce").fillna(0)
+        yr_df["과세표준(원)"] = pd.to_numeric(yr_df["과세표준(원)"],         errors="coerce").fillna(0)
+        yr_df["과세비율(%)"]  = (yr_df["과세표준(원)"] / yr_df["분배금(원)"].replace(0, pd.NA) * 100).fillna(0).round(1)
 
         if not yr_df.empty:
             pivot = yr_df.pivot_table(

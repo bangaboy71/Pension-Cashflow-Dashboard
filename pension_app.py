@@ -537,26 +537,19 @@ def _render_actual_section(url: str, target_monthly: float):
                 f"https://docs.google.com/spreadsheets/d/{sid}"
                 f"/export?format=csv&gid={gid}"
             )
-            # ── 연월 정규화: 날짜/Timestamp → "YYYY-MM" 문자열 ──────
-            # 실적 시트에 날짜(2026-04-01) 형식으로 입력되어도 월 단위로 통합
+            # 연월 정규화: "2026-04-01" 등 날짜 형식 → "2026-04"
             if "연월" in df.columns:
                 df["연월"] = pd.to_datetime(df["연월"], errors="coerce").dt.to_period("M").astype(str)
-
-            # ── 숫자 컬럼 정리 ──────────────────────────────────────
-            num_cols = ["공무원연금","IRP분배금","ISA분배금","연금저축","일반계좌","일반분배금","생활비"]
-            for col in num_cols:
+            # 숫자 컬럼 정리
+            _num = ["공무원연금","IRP분배금","ISA분배금","연금저축","일반계좌","일반분배금","생활비"]
+            for col in _num:
                 if col in df.columns:
-                    df[col] = pd.to_numeric(
-                        df[col].astype(str).str.replace(",",""), errors="coerce"
-                    ).fillna(0)
-
-            # ── 연월 단위로 합산 (같은 달 여러 행 → 1행으로 통합) ─────
-            # 실적 시트에 날짜별로 여러 행 입력해도 월 합계로 자동 처리
-            agg_cols = [c for c in num_cols if c in df.columns]
-            if "연월" in df.columns and agg_cols:
-                df = df.groupby("연월")[agg_cols].sum().reset_index()
+                    df[col] = pd.to_numeric(df[col].astype(str).str.replace(",",""), errors="coerce").fillna(0)
+            # 같은 달 여러 행 → 월 단위 합산
+            _agg = [c for c in _num if c in df.columns]
+            if "연월" in df.columns and _agg:
+                df = df.groupby("연월")[_agg].sum().reset_index()
                 df = df[df["연월"] != "NaT"].sort_values("연월")
-
             return df
         except Exception:
             return pd.DataFrame()
@@ -587,18 +580,14 @@ actual_gid = "여기에_실적탭_gid"
         st.warning("실적 시트 컬럼을 확인하세요: 연월|공무원연금|IRP분배금|ISA분배금|생활비")
         return
 
-    # 숫자 컬럼 재확인 (로더에서 처리되지만 안전망)
     for col in ["공무원연금","IRP분배금","ISA분배금","연금저축","일반계좌","일반분배금","생활비"]:
         if col in actual_df.columns:
             actual_df[col] = pd.to_numeric(
                 actual_df[col].astype(str).str.replace(",",""), errors="coerce"
             ).fillna(0)
 
-    # 총수입: 연금저축·일반계좌 컬럼도 포함
     _inc_cols = ["공무원연금","IRP분배금","ISA분배금","연금저축","일반계좌","일반분배금"]
-    actual_df["총수입"] = sum(
-        actual_df[c] for c in _inc_cols if c in actual_df.columns
-    )
+    actual_df["총수입"] = sum(actual_df[c] for c in _inc_cols if c in actual_df.columns)
     actual_df["잉여/부족"] = actual_df["총수입"] - actual_df["생활비"]
 
     # 최근 3개월 카드
@@ -2771,6 +2760,18 @@ with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as
     except Exception:
         wl_df = pd.DataFrame()
 
+    # ── 분배금과세 시트 로드 ──────────────────────────────
+    @st.cache_data(ttl=DATA_TTL, show_spinner=False)
+    def _load_dist_tax(url: str, gid: str) -> pd.DataFrame:
+        from pension_tax_monitor import load_dist_tax_sheet
+        return load_dist_tax_sheet(url, gid)
+
+    _dist_tax_gid = st.secrets.get("DIST_TAX_SHEET_GID", "")
+    try:
+        dist_tax_df = _load_dist_tax(SHEET_URL, _dist_tax_gid)
+    except Exception:
+        dist_tax_df = pd.DataFrame()
+
     st.write("✨ 준비 완료...")
     _cache_info = (
         "🔄 새로 로드됨"
@@ -3204,11 +3205,11 @@ if sc_choice != "기본 시트 현황" and sc_names:
     )
 
 # ── 메인 탭 ──────────────────────────────────────────
-_main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5, _main_tab6, _main_tab7 = st.tabs([
+_main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5, _main_tab6, _main_tab7, _main_tab8 = st.tabs([
     "📊 현금흐름 대시보드", "📒 월별 가계부",
     "📈 보유종목", "🔍 관심종목",
     "📐 수익률 벤치마크", "🎲 Monte Carlo",
-    "🤖 AI 자문",
+    "🤖 AI 자문", "🏦 과세관리",
 ])
 
 with _main_tab2:
@@ -5038,3 +5039,22 @@ with _main_tab7:
     }
 
     render_advisor_tab(_advisor_ctx)
+
+# ════════════════════════════════════════════════════════
+# 🏦 과세 관리 탭
+# ════════════════════════════════════════════════════════
+with _main_tab8:
+    from pension_tax_monitor import render_tax_monitor_tab
+
+    _tax_ctx = {
+        "dist_df":        dist_tax_df,
+        "year":           datetime.now().year,
+        "current_month":  datetime.now().month,
+        "irp_monthly":    irp_income,
+        "isa_monthly":    isa_income,
+        "gen_monthly":    _gen_monthly_income,
+        "ps_monthly":     ps_income,
+        "target_monthly": target_monthly,
+    }
+
+    render_tax_monitor_tab(_tax_ctx)

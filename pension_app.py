@@ -60,7 +60,6 @@ IRP_PENSION_PERSONAL_TAX = {  # 나이 → 세율(지방세 포함)
 
 
 
-
 def _render_household_tab(
     hh_df,
     display_income: float,

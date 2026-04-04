@@ -61,6 +61,19 @@ IRP_PENSION_PERSONAL_TAX = {  # 나이 → 세율(지방세 포함)
 
 
 
+"""
+household_tab_patch.py
+======================
+pension_app.py 의 _render_household_tab() 함수를 아래 버전으로 교체하세요.
+
+추가된 기능:
+  1. 월별 요약 카드 — 전월 대비 증감 delta 표시
+  2. 카테고리별 수입·지출 목록 — 전월 대비 증감 인라인 표시
+  3. [NEW] 카테고리별 월별 증감 추이 차트 (수입/지출 각각)
+  4. [NEW] 지출 카테고리 히트맵 — 월×카테고리 매트릭스
+  5. 기존 월별 추이·연간 누계·상세 내역 유지
+"""
+
 def _render_household_tab(
     hh_df,
     display_income: float,
@@ -524,19 +537,6 @@ def _render_actual_section(url: str, target_monthly: float):
                 f"https://docs.google.com/spreadsheets/d/{sid}"
                 f"/export?format=csv&gid={gid}"
             )
-            # 연월 정규화: "2026-04-01" 등 날짜 형식 → "2026-04"
-            if "연월" in df.columns:
-                df["연월"] = pd.to_datetime(df["연월"], errors="coerce").dt.to_period("M").astype(str)
-            # 숫자 컬럼 정리
-            _num = ["공무원연금","IRP분배금","ISA분배금","연금저축","일반계좌","일반분배금","생활비"]
-            for col in _num:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col].astype(str).str.replace(",",""), errors="coerce").fillna(0)
-            # 같은 달 여러 행 → 월 단위 합산
-            _agg = [c for c in _num if c in df.columns]
-            if "연월" in df.columns and _agg:
-                df = df.groupby("연월")[_agg].sum().reset_index()
-                df = df[df["연월"] != "NaT"].sort_values("연월")
             return df
         except Exception:
             return pd.DataFrame()
@@ -567,14 +567,17 @@ actual_gid = "여기에_실적탭_gid"
         st.warning("실적 시트 컬럼을 확인하세요: 연월|공무원연금|IRP분배금|ISA분배금|생활비")
         return
 
-    for col in ["공무원연금","IRP분배금","ISA분배금","연금저축","일반계좌","일반분배금","생활비"]:
+    for col in ["공무원연금","IRP분배금","ISA분배금","일반분배금","생활비"]:
         if col in actual_df.columns:
             actual_df[col] = pd.to_numeric(
                 actual_df[col].astype(str).str.replace(",",""), errors="coerce"
             ).fillna(0)
 
-    _inc_cols = ["공무원연금","IRP분배금","ISA분배금","연금저축","일반계좌","일반분배금"]
-    actual_df["총수입"] = sum(actual_df[c] for c in _inc_cols if c in actual_df.columns)
+    actual_df["총수입"] = (
+        actual_df["공무원연금"] + actual_df["IRP분배금"]
+        + actual_df["ISA분배금"]
+        + actual_df.get("일반분배금", pd.Series([0]*len(actual_df)))
+    )
     actual_df["잉여/부족"] = actual_df["총수입"] - actual_df["생활비"]
 
     # 최근 3개월 카드
@@ -1870,6 +1873,103 @@ def _income_tax_rate(taxable: float) -> float:
         return 94_060_000 + (taxable - 300_000_000) * 0.40
 
 
+def calc_irp_taxbase_from_sheet(
+    dist_tax_df: "pd.DataFrame",
+    year_month: str,
+    pension_items: list,
+) -> dict:
+    """
+    분배금과세 시트 + 연금현황 수량 → 실제 IRP 과세표준 계산.
+
+    반환값:
+        irp_taxbase_monthly : IRP 실제 월 과세표준 합계 (원)
+        irp_dist_monthly    : IRP 실제 월 총 분배금 (원, 과세표준과 다를 수 있음)
+        taxbase_ratio       : 과세표준 / 총분배금 비율
+        items               : 종목별 상세 리스트
+        has_data            : 시트 데이터 존재 여부
+    """
+    _empty = {
+        "irp_taxbase_monthly": 0.0,
+        "irp_dist_monthly":    0.0,
+        "taxbase_ratio":       1.0,
+        "items":               [],
+        "has_data":            False,
+    }
+
+    if dist_tax_df is None or dist_tax_df.empty:
+        return _empty
+    if "연월" not in dist_tax_df.columns or "분배금(원)" not in dist_tax_df.columns:
+        return _empty
+
+    # 이번달 데이터 필터
+    _ym = str(year_month)[:7]  # "YYYY-MM"
+    _month_df = dist_tax_df[
+        dist_tax_df["연월"].astype(str).str.startswith(_ym)
+    ].copy()
+
+    if _month_df.empty:
+        return _empty
+
+    # 연금현황 수량 맵 구성 (종목명 정규화)
+    def _norm(s): return str(s).strip().replace(" ", "").upper()
+    qty_map = {}
+    for it in pension_items:
+        nm  = it.get("종목명", "")
+        qty = float(it.get("수량", 0) or 0)
+        if nm and qty > 0:
+            qty_map[_norm(nm)] = qty
+
+    # 종목별 실제 분배금·과세표준 계산
+    total_dist    = 0.0
+    total_taxbase = 0.0
+    items_out     = []
+
+    for _, row in _month_df.iterrows():
+        nm       = str(row.get("종목명", "")).strip()
+        dps      = float(row.get("분배금(원)", 0) or 0)      # 주당 분배금
+        tax_dps  = float(row.get("과세표준(원)", 0) or 0)   # 주당 과세표준
+        acc      = str(row.get("계좌", "")).strip()
+
+        if acc not in ("IRP", "연금저축"):
+            continue
+
+        # 수량 조회 (정규화 매칭)
+        qty = qty_map.get(_norm(nm), 0.0)
+        if qty == 0:
+            # 부분 매칭 시도
+            for k, v in qty_map.items():
+                if _norm(nm) in k or k in _norm(nm):
+                    qty = v
+                    break
+
+        dist_total    = dps * qty
+        taxbase_total = tax_dps * qty
+
+        total_dist    += dist_total
+        total_taxbase += taxbase_total
+
+        items_out.append({
+            "종목명":    nm,
+            "계좌":      acc,
+            "주당분배금": dps,
+            "주당과세표준": tax_dps,
+            "수량":      qty,
+            "실제분배금":   dist_total,
+            "실제과세표준": taxbase_total,
+            "과세비율(%)":  round(tax_dps / dps * 100, 1) if dps > 0 else 0,
+        })
+
+    ratio = total_taxbase / total_dist if total_dist > 0 else 1.0
+
+    return {
+        "irp_taxbase_monthly": total_taxbase,
+        "irp_dist_monthly":    total_dist,
+        "taxbase_ratio":       ratio,
+        "items":               items_out,
+        "has_data":            len(items_out) > 0,
+    }
+
+
 def calc_after_tax(
     public_pension: float,
     irp_income: float,
@@ -2592,31 +2692,66 @@ def parse_pension_sheet_new(df: pd.DataFrame) -> dict:
         r = rows.iloc[0]
         return float(r.get("주당분배금", 0) or 0)
 
+    # ── IRP 원천별 비율 자동 계산 ─────────────────────────────
+    # 연금현황 시트의 메모 컬럼('퇴직금'/'개인납입') 기준으로
+    # irp_personal_ratio를 자동 계산 → 슬라이더 기본값으로 사용
+    _irp_rows = df[df["계좌"] == "IRP"].copy()
+    _irp_rows["원금"] = pd.to_numeric(_irp_rows["원금"], errors="coerce").fillna(0)
+    _irp_total_amt = _irp_rows["원금"].sum()
+
+    def _classify_source(memo: str) -> str:
+        m = str(memo).strip()
+        if "퇴직" in m: return "퇴직금"
+        if "개인" in m or "납입" in m: return "개인납입"
+        return "퇴직금"  # 기본값: 퇴직금
+
+    if "원천구분" in _irp_rows.columns:
+        # 시트에 원천구분 컬럼이 있으면 직접 사용
+        _irp_pers_amt = _irp_rows[
+            _irp_rows["원천구분"].astype(str).str.contains("개인|납입")
+        ]["원금"].sum()
+    elif "메모" in _irp_rows.columns:
+        # 메모 컬럼에서 자동 분류
+        _irp_rows["_src"] = _irp_rows["메모"].apply(_classify_source)
+        _irp_pers_amt = _irp_rows[_irp_rows["_src"] == "개인납입"]["원금"].sum()
+    else:
+        _irp_pers_amt = 0.0
+
+    # 자동 계산된 비율 (0~1), 시트 데이터 없으면 0 (전액 퇴직금)
+    _irp_personal_ratio_auto = (
+        float(_irp_pers_amt / _irp_total_amt)
+        if _irp_total_amt > 0 else 0.0
+    )
+
     return {
-        "public_pension":   _first("공적연금", "원금"),
-        "irp_total":        irp_total,
-        "isa_total":        isa_total,
-        "general_total":    gen_total,
-        "ps_total":         ps_total,
-        "target_monthly":   _first("목표생활비", "원금", default=1.0),
-        "isa_limit":        float(ISA_LIMIT),  # 코드 상수 기준
+        "public_pension":           _first("공적연금", "원금"),
+        "irp_total":                irp_total,
+        "isa_total":                isa_total,
+        "general_total":            gen_total,
+        "ps_total":                 ps_total,
+        "target_monthly":           _first("목표생활비", "원금", default=1.0),
+        "isa_limit":                float(ISA_LIMIT),  # 코드 상수 기준
         # 분배율 (가중평균)
-        "default_palantir": _wavg_rate("IRP"),
-        "default_kodex":    _wavg_rate("ISA"),
-        "default_general":  _wavg_rate("일반") if _wavg_rate("일반") > 0 else 2.88,
-        "default_ps":       _wavg_rate("연금저축"),
+        "default_palantir":         _wavg_rate("IRP"),
+        "default_kodex":            _wavg_rate("ISA"),
+        "default_general":          _wavg_rate("일반") if _wavg_rate("일반") > 0 else 2.88,
+        "default_ps":               _wavg_rate("연금저축"),
         # 수량·DPS (기존 모드 호환)
-        "irp_shares":       _first_shares("IRP"),
-        "isa_shares":       _first_shares("ISA"),
-        "ps_shares":        _first_shares("연금저축"),
-        "irp_dps_default":  _first_dps("IRP"),
-        "isa_dps_default":  _first_dps("ISA"),
-        "ps_dps_default":   _first_dps("연금저축"),
+        "irp_shares":               _first_shares("IRP"),
+        "isa_shares":               _first_shares("ISA"),
+        "ps_shares":                _first_shares("연금저축"),
+        "irp_dps_default":          _first_dps("IRP"),
+        "isa_dps_default":          _first_dps("ISA"),
+        "ps_dps_default":           _first_dps("연금저축"),
         # 종목별 상세 (시나리오 연동용)
-        "irp_종목":         _get_items("IRP"),
-        "isa_종목":         _get_items("ISA"),
-        "gen_종목":         _get_items("일반"),
-        "ps_종목":          _get_items("연금저축"),
+        "irp_종목":                 _get_items("IRP"),
+        "isa_종목":                 _get_items("ISA"),
+        "gen_종목":                 _get_items("일반"),
+        "ps_종목":                  _get_items("연금저축"),
+        # ★ 단기 개선: 원천별 비율 자동 계산값
+        "irp_personal_ratio_auto":  _irp_personal_ratio_auto,
+        "irp_ret_amt":              float(_irp_total_amt - _irp_pers_amt),
+        "irp_pers_amt":             float(_irp_pers_amt),
     }
 
 def extract_values(df: pd.DataFrame) -> dict:
@@ -2746,18 +2881,6 @@ with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as
         wl_df = load_watchlist(SHEET_URL, _wl_gid)
     except Exception:
         wl_df = pd.DataFrame()
-
-    # ── 분배금과세 시트 로드 ──────────────────────────────
-    @st.cache_data(ttl=DATA_TTL, show_spinner=False)
-    def _load_dist_tax(url: str, gid: str) -> pd.DataFrame:
-        from pension_tax_monitor import load_dist_tax_sheet
-        return load_dist_tax_sheet(url, gid)
-
-    _dist_tax_gid = st.secrets.get("DIST_TAX_SHEET_GID", "")
-    try:
-        dist_tax_df = _load_dist_tax(SHEET_URL, _dist_tax_gid)
-    except Exception:
-        dist_tax_df = pd.DataFrame()
 
     st.write("✨ 준비 완료...")
     _cache_info = (
@@ -3134,17 +3257,68 @@ _gen_monthly_income  = _calc_gen_monthly(
 )
 total_income = public_pension + irp_income + ps_income + isa_income + _gen_monthly_income
 
+# ── ★ 중기 개선: 분배금과세 시트 → IRP 실제 과세표준 계산 ──
+_now_ym = datetime.now().strftime("%Y-%m")
+try:
+    _taxbase_result = calc_irp_taxbase_from_sheet(
+        dist_tax_df   = dist_tax_df,
+        year_month    = _now_ym,
+        pension_items = _pension_irp_items,
+    )
+except Exception:
+    _taxbase_result = {"has_data": False, "irp_taxbase_monthly": 0.0,
+                       "irp_dist_monthly": 0.0, "taxbase_ratio": 1.0, "items": []}
+
 # 세후 계산
 _irp_pension_yr    = int(st.session_state.get("irp_pension_year", 1))
-_irp_personal_r    = float(st.session_state.get("irp_personal_ratio", 0.20))
+
+# ★ 단기 개선: 시트 자동 계산값 우선 사용, 없으면 슬라이더값
+# _vals["irp_personal_ratio_auto"]: 연금현황 시트 메모/원천구분 컬럼 기반 자동 계산
+_irp_ratio_auto    = float(_vals.get("irp_personal_ratio_auto", -1))
+if _irp_ratio_auto >= 0:
+    # 시트에서 자동 계산 가능 → 슬라이더에도 반영해 사용자가 확인 가능하도록
+    _irp_personal_r = _irp_ratio_auto
+    # 슬라이더 기본값을 자동 계산값으로 업데이트 (단, 사용자가 직접 조정했으면 그 값 유지)
+    if "irp_personal_ratio" not in st.session_state:
+        st.session_state["irp_personal_ratio"] = int(_irp_ratio_auto * 100)
+else:
+    _irp_personal_r = float(st.session_state.get("irp_personal_ratio", 0.20))
+
 _current_age       = datetime.now().year - 1971  # birth_year 고정값
-tax_result = calc_after_tax(
-    public_pension, irp_income, isa_income, ps_income,
-    irp_total=irp_total,
-    irp_pension_year=_irp_pension_yr,
-    irp_personal_ratio=_irp_personal_r,
-    age=_current_age,
-)
+# ★ 중기 개선: 분배금과세 시트 데이터가 있으면 실제 과세표준으로 세금 계산
+# 시트 미입력 종목은 기존 분배금 비율 방식으로 보완
+if _taxbase_result["has_data"]:
+    # 시트에 입력된 종목의 과세표준 합계
+    _irp_taxbase = _taxbase_result["irp_taxbase_monthly"]
+    # 시트 미입력 종목 분배금 추정 (전체 IRP 분배금 - 시트 입력 분배금)
+    _irp_dist_in_sheet = _taxbase_result["irp_dist_monthly"]
+    _irp_dist_not_in_sheet = max(0, irp_income - _irp_dist_in_sheet)
+    # 미입력 종목은 과세비율 100% 가정 (보수적)
+    _irp_taxbase_total = _irp_taxbase + _irp_dist_not_in_sheet
+    # calc_after_tax에 전달: irp_income 대신 과세표준을 사용
+    tax_result = calc_after_tax(
+        public_pension, _irp_taxbase_total, isa_income, ps_income,
+        irp_total=irp_total,
+        irp_pension_year=_irp_pension_yr,
+        irp_personal_ratio=_irp_personal_r,
+        age=_current_age,
+    )
+    # 세후 IRP 실수령액 보정: 세금은 과세표준 기준, 실수령은 실제 분배금 기준
+    _irp_tax_only = tax_result["IRP_세금"]
+    tax_result["IRP_세후"] = irp_income - _irp_tax_only
+    tax_result["총_세후"]  = (
+        tax_result["공적연금_세후"] + tax_result["IRP_세후"]
+        + tax_result["연금저축_세후"] + tax_result["ISA_세후"]
+    )
+else:
+    # 기존 방식 (분배금과세 시트 미연동)
+    tax_result = calc_after_tax(
+        public_pension, irp_income, isa_income, ps_income,
+        irp_total=irp_total,
+        irp_pension_year=_irp_pension_yr,
+        irp_personal_ratio=_irp_personal_r,
+        age=_current_age,
+    )
 if not use_health_ins:
     tax_result["공적연금_세후"]  += tax_result["공적연금_건보료"]
     tax_result["총_세후"]        += tax_result["공적연금_건보료"]
@@ -3153,6 +3327,11 @@ if not use_health_ins:
         tax_result["총_공제액"] / tax_result["총_세전"] * 100
         if tax_result["총_세전"] > 0 else 0
     )
+
+# ★ 과세표준 연동 상태를 session_state에 저장 (대시보드 표시용)
+st.session_state["_taxbase_result"]   = _taxbase_result
+st.session_state["_irp_personal_r"]   = _irp_personal_r
+st.session_state["_irp_ratio_auto"]   = _irp_ratio_auto
 
 display_income = tax_result["총_세후"] if show_tax else total_income
 achievement    = (display_income / target_monthly) * 100 if target_monthly > 0 else 0
@@ -3192,11 +3371,11 @@ if sc_choice != "기본 시트 현황" and sc_names:
     )
 
 # ── 메인 탭 ──────────────────────────────────────────
-_main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5, _main_tab6, _main_tab7, _main_tab8 = st.tabs([
+_main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5, _main_tab6, _main_tab7 = st.tabs([
     "📊 현금흐름 대시보드", "📒 월별 가계부",
     "📈 보유종목", "🔍 관심종목",
     "📐 수익률 벤치마크", "🎲 Monte Carlo",
-    "🤖 AI 자문", "🏦 과세관리",
+    "🤖 AI 자문",
 ])
 
 with _main_tab2:
@@ -5026,22 +5205,3 @@ with _main_tab7:
     }
 
     render_advisor_tab(_advisor_ctx)
-
-# ════════════════════════════════════════════════════════
-# 🏦 과세 관리 탭
-# ════════════════════════════════════════════════════════
-with _main_tab8:
-    from pension_tax_monitor import render_tax_monitor_tab
-
-    _tax_ctx = {
-        "dist_df":        dist_tax_df,
-        "year":           datetime.now().year,
-        "current_month":  datetime.now().month,
-        "irp_monthly":    irp_income,
-        "isa_monthly":    isa_income,
-        "gen_monthly":    _gen_monthly_income,
-        "ps_monthly":     ps_income,
-        "target_monthly": target_monthly,
-    }
-
-    render_tax_monitor_tab(_tax_ctx)

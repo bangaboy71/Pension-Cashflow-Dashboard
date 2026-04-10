@@ -61,6 +61,19 @@ IRP_PENSION_PERSONAL_TAX = {  # 나이 → 세율(지방세 포함)
 
 
 
+"""
+household_tab_patch.py
+======================
+pension_app.py 의 _render_household_tab() 함수를 아래 버전으로 교체하세요.
+
+추가된 기능:
+  1. 월별 요약 카드 — 전월 대비 증감 delta 표시
+  2. 카테고리별 수입·지출 목록 — 전월 대비 증감 인라인 표시
+  3. [NEW] 카테고리별 월별 증감 추이 차트 (수입/지출 각각)
+  4. [NEW] 지출 카테고리 히트맵 — 월×카테고리 매트릭스
+  5. 기존 월별 추이·연간 누계·상세 내역 유지
+"""
+
 def _render_household_tab(
     hh_df,
     display_income: float,
@@ -84,13 +97,17 @@ def _render_household_tab(
     if hh_df.empty:
         st.info(
             "**구글 시트에 `가계부` 탭을 추가하고 아래 헤더로 구성하세요.**\n\n"
-            "```\n연월 | 구분 | 카테고리 | 항목 | 금액 | 비고\n```\n\n"
-            "| 연월 | 구분 | 카테고리 | 항목 | 금액 | 비고 |\n"
-            "|---|---|---|---|---|---|\n"
-            "| 2026-04 | 수입 | 공무원연금 | 공무원연금 | 3624210 | |\n"
-            "| 2026-04 | 수입 | IRP분배금 | IRP분배금 | 3827200 | |\n"
-            "| 2026-04 | 지출 | 식비 | 마트/외식 | 650000 | |\n"
-            "| 2026-04 | 지출 | 여행/여가 | 알프스 준비 | 500000 | |\n\n"
+            "```\n연월 | 구분 | 카테고리 | 항목 | 금액 | 비고 | 특성\n```\n\n"
+            "| 연월 | 구분 | 카테고리 | 항목 | 금액 | 비고 | 특성 |\n"
+            "|---|---|---|---|---|---|---|\n"
+            "| 2026-04 | **이월** | 현금 | 국민은행 | 5537275 | 주계좌 | 변동 |\n"
+            "| 2026-04 | **이월** | 채무 | 재일은행 | -3911369 | 신용대출 | 변동 |\n"
+            "| 2026-04 | 수입 | 공무원연금 | 공무원연금 | 3624210 | | 고정 |\n"
+            "| 2026-04 | 수입 | IRP분배금 | IRP분배금 | 3827200 | | 변동 |\n"
+            "| 2026-04 | 지출 | 식비 | 마트/외식 | 650000 | | 변동 |\n"
+            "| 2026-04 | 지출 | 보험료 | 실손보험 | 90000 | | 고정 |\n\n"
+            "**이월**: 전월 잔액. 자산(양수), 채무(음수)로 입력 — 기초잔액·기말잔액 자동 계산\n\n"
+            "**특성**: 고정/변동 — 지출 고정비 분석에 활용 (없어도 무방)\n\n"
             "탭 생성 후 gid를 `HOUSEHOLD_SHEET_GID`에 입력하세요."
         )
         st.divider()
@@ -108,17 +125,17 @@ def _render_household_tab(
     hh_df = hh_df.copy()
     hh_df["금액"] = pd.to_numeric(hh_df["금액"], errors="coerce").fillna(0)
     hh_df["연월"] = hh_df["연월"].astype(str)
+    if "특성" not in hh_df.columns:
+        hh_df["특성"] = ""
 
     all_ym = sorted(hh_df["연월"].unique(), reverse=True)
     cur_ym = f"{_dt.now().year}-{_dt.now().month:02d}"
     default_idx = all_ym.index(cur_ym) if cur_ym in all_ym else 0
 
-    # 전월 계산
     def _prev_ym(ym: str) -> str:
         y, m = int(ym[:4]), int(ym[5:7])
         m -= 1
-        if m == 0:
-            m, y = 12, y - 1
+        if m == 0: m, y = 12, y - 1
         return f"{y}-{m:02d}"
 
     # ── 연월 선택 ────────────────────────────────────────
@@ -129,43 +146,186 @@ def _render_household_tab(
     )
     prev_ym = _prev_ym(sel_ym)
 
-    month_df   = hh_df[hh_df["연월"] == sel_ym]
-    prev_df    = hh_df[hh_df["연월"] == prev_ym]
-    income_df  = month_df[month_df["구분"] == "수입"]
-    expense_df = month_df[month_df["구분"] == "지출"]
-    prev_inc   = prev_df[prev_df["구분"] == "수입"]
-    prev_exp   = prev_df[prev_df["구분"] == "지출"]
+    month_df    = hh_df[hh_df["연월"] == sel_ym]
+    prev_df     = hh_df[hh_df["연월"] == prev_ym]
 
+    # 구분별 분리 — 이월 추가
+    carryover_df = month_df[month_df["구분"] == "이월"]   # ★ 이월
+    income_df    = month_df[month_df["구분"] == "수입"]
+    expense_df   = month_df[month_df["구분"] == "지출"]
+    prev_inc     = prev_df[prev_df["구분"] == "수입"]
+    prev_exp     = prev_df[prev_df["구분"] == "지출"]
+    prev_carry   = prev_df[prev_df["구분"] == "이월"]
+
+    # ── 이월 집계 ───────────────────────────────────────
+    # 양수 이월 = 자산(현금·예금), 음수 이월 = 채무(대출·마이너스)
+    carryover_asset = carryover_df[carryover_df["금액"] >= 0]["금액"].sum()
+    carryover_debt  = carryover_df[carryover_df["금액"] <  0]["금액"].sum()
+    carryover_net   = carryover_asset + carryover_debt   # 기초 순잔액
+
+    # ── 수입·지출 집계 ──────────────────────────────────
     total_income_hh  = income_df["금액"].sum()
     total_expense_hh = expense_df["금액"].sum()
-    balance          = total_income_hh - total_expense_hh
+    balance          = total_income_hh - total_expense_hh    # 순수지
+    ending_balance   = carryover_net + balance               # 기말잔액
+
     prev_income_tot  = prev_inc["금액"].sum()
     prev_expense_tot = prev_exp["금액"].sum()
     prev_balance     = prev_income_tot - prev_expense_tot
+    prev_carry_net   = prev_carry["금액"].sum()
+
+    # 고정/변동 분류
+    fixed_exp   = expense_df[expense_df["특성"] == "고정"]["금액"].sum()
+    var_exp     = expense_df[expense_df["특성"] != "고정"]["금액"].sum()
 
     # ════════════════════════════════════════════════════
-    # 1. 월별 요약 카드 (전월 대비 delta 포함)
+    # 1. 월별 요약 카드 (이월 포함 2행)
     # ════════════════════════════════════════════════════
+    # 1행: 기초잔액 / 총수입 / 총지출 / 순수지
     mc1, mc2, mc3, mc4 = st.columns(4)
     mc1.metric(
+        "기초잔액 (이월)",
+        f"{carryover_net:,.0f}원" if carryover_df.empty == False else "미입력",
+        delta=f"{carryover_net - prev_carry_net:+,.0f}원" if prev_carry_net != 0 else None,
+        help="이월 항목 합계 (자산 - 채무)",
+    )
+    mc2.metric(
         "총 수입", f"{total_income_hh:,.0f}원",
         delta=f"{total_income_hh - prev_income_tot:+,.0f}원" if prev_income_tot else None,
     )
-    mc2.metric(
+    mc3.metric(
         "총 지출", f"{total_expense_hh:,.0f}원",
         delta=f"{total_expense_hh - prev_expense_tot:+,.0f}원" if prev_expense_tot else None,
         delta_color="inverse",
     )
-    mc3.metric(
-        "잉여/부족", f"{balance:+,.0f}원",
+    mc4.metric(
+        "순수지", f"{balance:+,.0f}원",
         delta=f"{balance - prev_balance:+,.0f}원" if prev_balance else None,
         delta_color="normal" if balance >= 0 else "inverse",
     )
-    mc4.metric(
+
+    # 2행: 자산이월 / 채무이월 / 기말잔액 / 목표대비
+    mc5, mc6, mc7, mc8 = st.columns(4)
+    mc5.metric("자산 이월", f"{carryover_asset:,.0f}원", help="현금·예금 등 양수 이월 합계")
+    mc6.metric(
+        "채무 이월", f"{abs(carryover_debt):,.0f}원",
+        delta="채무" if carryover_debt < 0 else None,
+        delta_color="inverse",
+        help="대출·마이너스 등 음수 이월 합계 (절댓값 표시)",
+    )
+    mc7.metric(
+        "기말잔액 (추정)", f"{ending_balance:,.0f}원",
+        delta=f"{ending_balance - (prev_carry_net + prev_balance):+,.0f}원" if prev_carry_net != 0 else None,
+        delta_color="normal" if ending_balance >= 0 else "inverse",
+        help="기초잔액 + 순수지",
+    )
+    mc8.metric(
         "목표 대비",
         f"{(total_income_hh / target_monthly * 100) if target_monthly > 0 else 0:.0f}%",
         help="이번달 총 수입 ÷ 목표 생활비",
     )
+
+    st.divider()
+
+    # ════════════════════════════════════════════════════
+    # 1-B. 이월 현황 섹션
+    # ════════════════════════════════════════════════════
+    if not carryover_df.empty:
+        with st.expander(
+            f"🏦 이월 현황 — 자산 {carryover_asset/10000:.0f}만 · "
+            f"채무 {abs(carryover_debt)/10000:.0f}만 · "
+            f"순잔액 {carryover_net/10000:.0f}만",
+            expanded=True,
+        ):
+            co_l, co_r = st.columns(2)
+
+            # 자산 이월 목록
+            with co_l:
+                st.markdown("**💰 자산 이월**")
+                asset_rows = carryover_df[carryover_df["금액"] >= 0].sort_values("금액", ascending=False)
+                for _, r in asset_rows.iterrows():
+                    _item  = str(r.get("항목","")).strip() or str(r.get("카테고리","")).strip()
+                    _memo  = str(r.get("비고","")).strip()
+                    _amt   = float(r["금액"])
+                    st.markdown(
+                        f"<div style='display:flex;justify-content:space-between;align-items:center;"
+                        f"padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:0.88rem;'>"
+                        f"<span style='color:rgba(255,255,255,0.7);'>{_item}"
+                        f"{'<span style="font-size:0.75rem;color:rgba(255,255,255,0.35);margin-left:6px;">' + _memo + '</span>' if _memo and _memo != 'nan' else ''}"
+                        f"</span>"
+                        f"<span style='color:#7dffb0;font-weight:600;'>{_amt:,.0f}원</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                st.markdown(
+                    f"<div style='display:flex;justify-content:space-between;padding:6px 0;"
+                    f"font-size:0.9rem;font-weight:700;margin-top:4px;'>"
+                    f"<span>합계</span>"
+                    f"<span style='color:#7dffb0;'>{carryover_asset:,.0f}원</span></div>",
+                    unsafe_allow_html=True,
+                )
+
+            # 채무 이월 목록
+            with co_r:
+                st.markdown("**💳 채무 이월**")
+                debt_rows = carryover_df[carryover_df["금액"] < 0].sort_values("금액")
+                if debt_rows.empty:
+                    st.caption("채무 이월 없음")
+                else:
+                    for _, r in debt_rows.iterrows():
+                        _item  = str(r.get("항목","")).strip() or str(r.get("카테고리","")).strip()
+                        _memo  = str(r.get("비고","")).strip()
+                        _amt   = float(r["금액"])
+                        # 해당 채무에 대한 지출(상환) 내역 찾기
+                        _repay = expense_df[
+                            expense_df["카테고리"] == "채무"
+                        ]["금액"].sum() if "채무" in expense_df["카테고리"].values else 0
+                        st.markdown(
+                            f"<div style='display:flex;justify-content:space-between;align-items:center;"
+                            f"padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:0.88rem;'>"
+                            f"<span style='color:rgba(255,255,255,0.7);'>{_item}"
+                            f"{'<span style="font-size:0.75rem;color:rgba(255,255,255,0.35);margin-left:6px;">' + _memo + '</span>' if _memo and _memo != 'nan' else ''}"
+                            f"</span>"
+                            f"<span style='color:#FF4B4B;font-weight:600;'>{_amt:,.0f}원</span></div>",
+                            unsafe_allow_html=True,
+                        )
+                    st.markdown(
+                        f"<div style='display:flex;justify-content:space-between;padding:6px 0;"
+                        f"font-size:0.9rem;font-weight:700;margin-top:4px;'>"
+                        f"<span>합계</span>"
+                        f"<span style='color:#FF4B4B;'>{carryover_debt:,.0f}원</span></div>",
+                        unsafe_allow_html=True,
+                    )
+
+            # 채무 월별 추이 차트
+            _debt_monthly = (
+                hh_df[hh_df["구분"] == "이월"]
+                .groupby("연월")
+                .apply(lambda g: g[g["금액"] < 0]["금액"].sum())
+                .abs()
+                .reset_index()
+                .rename(columns={0: "채무잔액"})
+                .sort_values("연월")
+            )
+            if len(_debt_monthly) >= 2:
+                st.markdown("**채무 잔액 월별 추이**")
+                fig_debt = _go.Figure(_go.Scatter(
+                    x=_debt_monthly["연월"],
+                    y=_debt_monthly["채무잔액"] / 10000,
+                    mode="lines+markers",
+                    line=dict(color="#FF4B4B", width=2),
+                    marker=dict(size=7),
+                    fill="tozeroy",
+                    fillcolor="rgba(255,75,75,0.08)",
+                    hovertemplate="%{x}: %{y:,.1f}만원<extra></extra>",
+                ))
+                fig_debt.update_layout(
+                    height=180, paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(255,255,255,0.02)", font_color="white",
+                    margin=dict(t=10, b=30, l=10, r=10),
+                    yaxis=dict(title="만원", tickformat=","),
+                    xaxis=dict(tickangle=-30),
+                )
+                st.plotly_chart(fig_debt, use_container_width=True)
 
     st.divider()
 
@@ -227,20 +387,43 @@ def _render_household_tab(
         else:
             st.caption("수입 내역 없음")
 
-    # ── 지출 내역 ────────────────────────────────────────
+    # ── 지출 내역 (고정/변동 배지 포함) ─────────────────────
     with right_col:
         st.markdown("**💸 지출 내역**")
         if not expense_df.empty:
-            exp_by_cat  = expense_df.groupby("카테고리")["금액"].sum().reset_index().sort_values("금액", ascending=False)
+            exp_by_cat   = expense_df.groupby("카테고리")["금액"].sum().reset_index().sort_values("금액", ascending=False)
             prev_exp_cat = prev_exp.groupby("카테고리")["금액"].sum().to_dict() if not prev_exp.empty else {}
+            # 카테고리별 특성 (고정/변동) — 해당 카테고리 내 가장 많은 특성값
+            cat_nature = {}
+            if "특성" in expense_df.columns:
+                for cat_v in exp_by_cat["카테고리"]:
+                    cat_rows = expense_df[expense_df["카테고리"] == cat_v]["특성"].value_counts()
+                    cat_nature[cat_v] = cat_rows.index[0] if not cat_rows.empty else ""
+
             for _, row in exp_by_cat.iterrows():
                 badge = _delta_badge(row["금액"], prev_exp_cat.get(row["카테고리"], 0), True)
+                nature = cat_nature.get(row["카테고리"], "")
+                nature_badge = ""
+                if nature == "고정":
+                    nature_badge = "<span style='font-size:0.68rem;background:rgba(135,206,235,0.15);color:#87CEEB;padding:1px 5px;border-radius:3px;margin-right:4px;'>고정</span>"
+                elif nature == "변동":
+                    nature_badge = "<span style='font-size:0.68rem;background:rgba(255,215,0,0.12);color:#FFD700;padding:1px 5px;border-radius:3px;margin-right:4px;'>변동</span>"
                 st.markdown(
                     f"<div style='display:flex; justify-content:space-between; align-items:center;"
                     f"padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.05); font-size:0.88rem;'>"
-                    f"<span style='color:rgba(255,255,255,0.7);'>{row['카테고리']}</span>"
+                    f"<span style='color:rgba(255,255,255,0.7);'>{nature_badge}{row['카테고리']}</span>"
                     f"<span><span style='color:#FF4B4B; font-weight:600;'>{row['금액']:,.0f}원</span>"
                     f"{badge}</span></div>",
+                    unsafe_allow_html=True,
+                )
+            # 고정/변동 소계
+            if fixed_exp > 0 or var_exp > 0:
+                st.markdown(
+                    f"<div style='display:flex;justify-content:space-between;padding:4px 0;"
+                    f"font-size:0.78rem;color:rgba(255,255,255,0.4);margin-top:2px;'>"
+                    f"<span>고정 {fixed_exp/10000:.1f}만 · 변동 {var_exp/10000:.1f}만</span>"
+                    f"<span>고정비율 {fixed_exp/total_expense_hh*100:.0f}%</span></div>"
+                    if total_expense_hh > 0 else "",
                     unsafe_allow_html=True,
                 )
             st.markdown(
@@ -398,7 +581,11 @@ def _render_household_tab(
     # ════════════════════════════════════════════════════
     st.divider()
     st.markdown("**📈 월별 수입·지출 추이**")
-    monthly_hh = hh_df.groupby(["연월","구분"])["금액"].sum().unstack(fill_value=0).reset_index()
+    monthly_hh = (
+        hh_df[hh_df["구분"].isin(["수입","지출"])]
+        .groupby(["연월","구분"])["금액"].sum()
+        .unstack(fill_value=0).reset_index()
+    )
     if "수입" not in monthly_hh.columns: monthly_hh["수입"] = 0
     if "지출" not in monthly_hh.columns: monthly_hh["지출"] = 0
     monthly_hh["잉여"] = monthly_hh["수입"] - monthly_hh["지출"]
@@ -424,7 +611,11 @@ def _render_household_tab(
     st.divider()
     st.markdown("**📆 연간 누계**")
     hh_df["연도"] = hh_df["연월"].str[:4]
-    annual_hh = hh_df.groupby(["연도","구분"])["금액"].sum().unstack(fill_value=0).reset_index()
+    annual_hh = (
+        hh_df[hh_df["구분"].isin(["수입","지출"])]
+        .groupby(["연도","구분"])["금액"].sum()
+        .unstack(fill_value=0).reset_index()
+    )
     if "수입" not in annual_hh.columns: annual_hh["수입"] = 0
     if "지출" not in annual_hh.columns: annual_hh["지출"] = 0
     annual_hh["잉여"] = annual_hh["수입"] - annual_hh["지출"]
@@ -441,9 +632,15 @@ def _render_household_tab(
         },
     )
 
-    with st.expander("📋 이번달 상세 내역"):
-        disp = month_df[["구분","카테고리","항목","금액"] +
-                        (["비고"] if "비고" in month_df.columns else [])].copy()
+    with st.expander("📋 이번달 상세 내역 (이월 포함)"):
+        _disp_cols = ["구분","카테고리","항목","금액"]
+        if "특성" in month_df.columns: _disp_cols.append("특성")
+        if "비고" in month_df.columns:  _disp_cols.append("비고")
+        disp = month_df[_disp_cols].copy()
+        # 이월→수입→지출 순 정렬
+        _order_map = {"이월": 0, "수입": 1, "지출": 2}
+        disp["_ord"] = disp["구분"].map(_order_map).fillna(3)
+        disp = disp.sort_values(["_ord","카테고리"]).drop(columns=["_ord"])
         disp["금액"] = disp["금액"].apply(lambda x: f"{x:,.0f}")
         st.dataframe(disp, hide_index=True, use_container_width=True)
 
@@ -989,7 +1186,7 @@ def _render_holdings_tab(
     disp_df = pd.DataFrame(rows)
 
     # ══════════════════════════════════════════════════════
-    # 1. 전체 요약 카드 + 계좌별 소계 카드
+    # 1. 계좌별 요약 카드 (상단)
     # ══════════════════════════════════════════════════════
     _total_eval = disp_df["평가금액"].sum()
     _total_buy  = disp_df["매입금액"].sum()
@@ -998,8 +1195,10 @@ def _render_holdings_tab(
     _total_day  = disp_df["전일대비(원)"].sum()
     _total_day_pct = (_total_day / (_total_eval - _total_day) * 100) if (_total_eval - _total_day) > 0 else 0
 
-    # 전체 합계 카드 4열
     c1, c2, c3, c4 = st.columns(4)
+    _ret_c = "#7dffb0" if _total_ret >= 0 else "#FF4B4B"
+    _day_c = "#7dffb0" if _total_day >= 0 else "#FF4B4B"
+
     c1.metric("계좌 평가액", f"{_total_eval:,.0f}원",
               delta=f"{_total_day:+,.0f}원 ({_total_day_pct:+.2f}%)",
               delta_color="normal" if _total_day >= 0 else "inverse")
@@ -1009,199 +1208,79 @@ def _render_holdings_tab(
     c4.metric("계좌 수익률", f"{_total_ret:+.2f}%",
               delta_color="normal" if _total_ret >= 0 else "inverse")
 
-    # 계좌별 소계 카드 (IRP/ISA/연금저축/일반)
-    _acc_order  = ["IRP", "ISA", "연금저축", "일반"]
-    _acc_border = {"IRP":"#87CEEB","ISA":"#7dffb0","연금저축":"#FFD700","일반":"#AFA9EC"}
-    _acc_groups = disp_df.groupby("계좌").agg(
-        평가금액=("평가금액","sum"), 매입금액=("매입금액","sum"), 손익=("손익","sum")
-    ).reset_index()
-    _sorted_accs = sorted(
-        _acc_groups.to_dict("records"),
-        key=lambda r: _acc_order.index(r["계좌"]) if r["계좌"] in _acc_order else 99,
-    )
-    _acc_cols = st.columns(len(_sorted_accs))
-    for _i, _ar in enumerate(_sorted_accs):
-        _acc = _ar["계좌"]
-        _ae, _ab, _ag = _ar["평가금액"], _ar["매입금액"], _ar["손익"]
-        _ar2 = (_ag / _ab * 100) if _ab > 0 else 0
-        _bc  = _acc_border.get(_acc, "#AFA9EC")
-        _gc  = "#7dffb0" if _ag >= 0 else "#FF4B4B"
-        with _acc_cols[_i]:
-            st.markdown(
-                f"<div style='background:rgba(255,255,255,0.04);"
-                f"border:1px solid rgba(255,255,255,0.1);"
-                f"border-top:3px solid {_bc};border-radius:8px;"
-                f"padding:10px 12px;margin-top:10px;'>"
-                f"<div style='font-size:0.75rem;font-weight:700;color:{_bc};margin-bottom:6px;'>{_acc}</div>"
-                f"<div style='font-size:0.82rem;color:rgba(255,255,255,0.45);margin-bottom:1px;'>평가액</div>"
-                f"<div style='font-size:0.95rem;font-weight:600;margin-bottom:4px;'>{_ae:,.0f}원</div>"
-                f"<div style='font-size:0.75rem;color:rgba(255,255,255,0.35);'>매입 {_ab:,.0f}원</div>"
-                f"<div style='font-size:0.82rem;color:{_gc};margin-top:4px;font-weight:600;'>"
-                f"{_ag:+,.0f}원 ({_ar2:+.2f}%)</div></div>",
-                unsafe_allow_html=True,
-            )
-
     # ══════════════════════════════════════════════════════
-    # 2. 보유종목 테이블 (클릭 → 상세 연동)
+    # 2. 보유종목 테이블
     # ══════════════════════════════════════════════════════
     st.divider()
 
-    # 계좌 순서 정렬 및 배지 스타일
-    _badge_css = {
-        "IRP":    "background:rgba(135,206,235,0.15);color:#87CEEB;",
-        "ISA":    "background:rgba(125,255,176,0.15);color:#7dffb0;",
-        "연금저축": "background:rgba(255,215,0,0.15);color:#FFD700;",
-        "일반":   "background:rgba(175,169,236,0.15);color:#AFA9EC;",
-    }
-    disp_df["_ord"] = disp_df["계좌"].apply(
-        lambda x: _acc_order.index(x) if x in _acc_order else 99
-    )
-    disp_df = disp_df.sort_values(["_ord","종목명"]).drop(columns=["_ord"])
-    _nm_list = disp_df["종목명"].tolist()
+    tbl_cols = ["종목명","수량","매입단가","매입금액","현재가",
+                "평가금액","손익","전일대비(원)","전일대비(%)","누적수익률(%)",
+                "주당분배금","월분배금","분배율(%)"]
 
-    # session_state에서 선택 종목 관리
-    if "hld_sel_nm" not in st.session_state:
-        st.session_state["hld_sel_nm"] = ""
+    # ── 색상 컬럼 적용 (Styler) ──────────────────────────
+    _color_cols = ["손익","전일대비(원)","전일대비(%)","누적수익률(%)"]
 
-    # 각 행에 클릭 버튼을 심어 선택 상태를 session_state로 전달
-    # → HTML 테이블 + st.button 조합 (Streamlit 표준 방식)
-    _num_cols = {"수량","매입단가","매입금액","현재가","평가금액",
-                 "손익","전일대비(원)","전일대비(%)","누적수익률(%)",
-                 "주당분배금","월분배금","분배율(%)"}
-
-    def _cell_color(v, col):
-        if col in ("손익","전일대비(원)","전일대비(%)","누적수익률(%)"):
-            if isinstance(v, (int,float)):
-                if v > 0: return "color:#FF4B4B;font-weight:600"
-                if v < 0: return "color:#4B9EFF;font-weight:600"
-        return ""
-
-    def _cell_fmt(v, col):
-        if col in ("손익","전일대비(원)"):
-            return f"{v:+,.0f}" if isinstance(v,(int,float)) else str(v)
-        if col in ("전일대비(%)","누적수익률(%)","분배율(%)"):
-            return f"{v:+.2f}%" if isinstance(v,(int,float)) else str(v)
-        if col in ("수량","매입단가","매입금액","현재가","평가금액","주당분배금","월분배금"):
-            return f"{v:,.0f}" if isinstance(v,(int,float)) else str(v)
-        return str(v) if not (isinstance(v,float) and v!=v) else "-"
-
-    tbl_data_cols = ["계좌","종목명","수량","매입단가","매입금액","현재가",
-                     "평가금액","손익","전일대비(원)","전일대비(%)","누적수익률(%)",
-                     "주당분배금","월분배금","분배율(%)"]
-    hdrs          = ["계좌","종목명","수량","매입단가","매입금액","현재가",
-                     "평가금액","손익","전일대비(원)","전일대비(%)","수익률(%)",
-                     "주당분배금","월분배금","분배율(%)"]
-
-    _th = ("background:rgba(255,255,255,0.06);padding:7px 10px;"
-           "font-size:0.78rem;font-weight:600;color:rgba(255,255,255,0.55);"
-           "border-bottom:1px solid rgba(255,255,255,0.1);white-space:nowrap;")
-    _tr_sep = ("background:rgba(255,255,255,0.03);padding:5px 10px;"
-               "font-size:0.75rem;color:rgba(255,255,255,0.5);"
-               "border-bottom:1px solid rgba(255,255,255,0.15);")
-    _tr_item = "border-bottom:0.5px solid rgba(255,255,255,0.06);"
-    _tr_sel  = "border-bottom:0.5px solid rgba(255,255,255,0.06);background:rgba(135,206,235,0.07);outline:1px solid rgba(135,206,235,0.25);"
-
-    html_rows = []
-    prev_acc  = None
-    for _, row in disp_df.iterrows():
-        acc = str(row.get("계좌",""))
-        nm  = str(row.get("종목명",""))
-
-        # 계좌 구분행
-        if acc != prev_acc:
-            _ag2 = _acc_groups[_acc_groups["계좌"]==acc]
-            if not _ag2.empty:
-                _ge = int(_ag2["평가금액"].iloc[0])
-                _gb = int(_ag2["매입금액"].iloc[0])
-                _gg = int(_ag2["손익"].iloc[0])
-                _gr = (_gg/_gb*100) if _gb>0 else 0
-                _gc2 = "#7dffb0" if _gg>=0 else "#FF4B4B"
-                _bst = _badge_css.get(acc,"")
-                html_rows.append(
-                    f'<tr><td colspan="{len(tbl_data_cols)}" style="{_tr_sep}">'
-                    f'<span style="font-size:0.72rem;font-weight:700;padding:2px 8px;border-radius:4px;{_bst}">{acc}</span>'
-                    f'&nbsp;&nbsp;평가 {_ge:,.0f}원 &nbsp;·&nbsp; 매입 {_gb:,.0f}원 &nbsp;·&nbsp;'
-                    f' 손익 <span style="color:{_gc2};font-weight:600;">{_gg:+,.0f}원 ({_gr:+.2f}%)</span>'
-                    f'</td></tr>'
+    def _style_pnl(df):
+        """손익 컬럼 음양에 따라 텍스트 색상 적용"""
+        styles = pd.DataFrame("", index=df.index, columns=df.columns)
+        for col in _color_cols:
+            if col in df.columns:
+                styles[col] = df[col].apply(
+                    lambda v: "color: #FF4B4B; font-weight:600"   # 양수 → 빨강
+                    if isinstance(v, (int,float)) and v > 0
+                    else ("color: #4B9EFF; font-weight:600"        # 음수 → 파랑
+                          if isinstance(v, (int,float)) and v < 0
+                          else "color: rgba(255,255,255,0.4)")
                 )
-            prev_acc = acc
+        return styles
 
-        # 선택 여부에 따라 행 스타일 결정
-        is_sel   = (st.session_state.get("hld_sel_nm","") == nm)
-        row_style = _tr_sel if is_sel else _tr_item
-        cells = []
-        for col in tbl_data_cols:
-            v     = row.get(col,"")
-            align = "right" if col in _num_cols else "left"
-            td_st = f"padding:6px 10px;font-size:0.82rem;text-align:{align};white-space:nowrap;"
-            if col == "계좌":
-                bst = _badge_css.get(acc,"")
-                cells.append(
-                    f'<td style="{td_st}">'
-                    f'<span style="font-size:0.70rem;font-weight:700;padding:2px 7px;border-radius:4px;{bst}">{acc}</span>'
-                    f'</td>'
-                )
-            else:
-                cc = _cell_color(v, col)
-                fv = _cell_fmt(v, col)
-                cells.append(f'<td style="{td_st}{cc}">{fv}</td>')
-        html_rows.append(f'<tr style="{row_style}">{"".join(cells)}</tr>')
+    # 포맷 함수 정의
+    def _fmt(df):
+        fmt = {}
+        for col in df.columns:
+            if col in ("손익","전일대비(원)"):
+                fmt[col] = lambda v: f"{v:+,.0f}" if isinstance(v,(int,float)) else v
+            elif col in ("전일대비(%)","누적수익률(%)","분배율(%)"):
+                fmt[col] = lambda v: f"{v:+.2f}%" if isinstance(v,(int,float)) else v
+            elif col in ("수량","매입단가","매입금액","현재가","평가금액","주당분배금","월분배금"):
+                fmt[col] = lambda v: f"{v:,.0f}" if isinstance(v,(int,float)) else v
+        return fmt
 
-    hdr_html = "".join(
-        f'<th style="{_th}text-align:{"right" if h in _num_cols else "left"}">{h}</th>'
-        for h in hdrs
+    _styled = (
+        disp_df[tbl_cols]
+        .style
+        .apply(_style_pnl, axis=None)
+        .format(_fmt(disp_df[tbl_cols]))
     )
-    table_html = (
-        f'<div style="overflow-x:auto;border:1px solid rgba(255,255,255,0.1);'
-        f'border-radius:8px;margin-bottom:4px;">'
-        f'<table style="width:100%;border-collapse:collapse;">'
-        f'<thead><tr>{hdr_html}</tr></thead>'
-        f'<tbody>{"".join(html_rows)}</tbody>'
-        f'</table></div>'
-    )
-    st.markdown(
-        "<div style='font-size:11px;color:rgba(255,255,255,0.4);margin-bottom:4px;'>"
-        "▶ 행을 클릭하면 종목 상세가 펼쳐집니다</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(table_html, unsafe_allow_html=True)
 
-    # 행 클릭 → 종목 선택: CSS로 숨긴 버튼 + HTML onclick sendPrompt 없이
-    # Streamlit 내장 st.radio를 숨긴 형태로 사용 (가장 안정적)
-    # 실제 클릭은 아래 selectbox로 처리, HTML 표는 시각적 표현
-    st.markdown(
-        "<style>.hld-sel-row{display:flex;flex-wrap:wrap;gap:4px;margin:4px 0 8px;}</style>",
-        unsafe_allow_html=True,
-    )
-    # 종목 선택 버튼 (작고 컴팩트하게 표시)
-    _btn_html = "<div class='hld-sel-row'>"
-    for _nm_b in _nm_list:
-        _is_cur = (st.session_state.get("hld_sel_nm","") == _nm_b)
-        _btn_style = (
-            "font-size:10px;padding:2px 8px;border-radius:4px;cursor:pointer;"
-            + ("background:rgba(135,206,235,0.2);color:#87CEEB;border:1px solid rgba(135,206,235,0.4);"
-               if _is_cur else
-               "background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.5);border:1px solid rgba(255,255,255,0.1);")
-        )
-        _btn_html += f"<span style='{_btn_style}'>{_nm_b[:14]}</span>"
-    _btn_html += "</div>"
-    st.markdown(_btn_html, unsafe_allow_html=True)
+    # 종목 선택 — 색상 테이블과 분리해서 인덱스 선택 radio로 처리
+    _sel_nm_key = st.session_state.get("hld_sel_nm", "")
+    _nm_list    = disp_df["종목명"].tolist()
+    if _sel_nm_key not in _nm_list:
+        _sel_nm_key = _nm_list[0] if _nm_list else ""
 
-    _sel_nm_new = st.selectbox(
-        "종목 선택 (클릭 연동)",
-        ["(선택 안 함)"] + _nm_list,
-        index=(_nm_list.index(st.session_state.get("hld_sel_nm","")) + 1)
-              if st.session_state.get("hld_sel_nm","") in _nm_list else 0,
-        key="hld_sel_box",
+    st.dataframe(
+        _styled,
+        hide_index=True, use_container_width=True,
+        column_config={
+            "수량":       st.column_config.NumberColumn(),
+            "매입단가":   st.column_config.NumberColumn(),
+            "매입금액":   st.column_config.NumberColumn(),
+            "현재가":     st.column_config.NumberColumn(),
+            "평가금액":   st.column_config.NumberColumn(),
+            "주당분배금": st.column_config.NumberColumn(),
+            "월분배금":   st.column_config.NumberColumn(),
+        },
+    )
+
+    # 종목 선택 셀렉트박스 (상세 연동용)
+    _sel_nm = st.selectbox(
+        "상세 분석 종목",
+        _nm_list,
+        index=_nm_list.index(_sel_nm_key) if _sel_nm_key in _nm_list else 0,
+        key="hld_sel_nm",
         label_visibility="collapsed",
     )
-    if _sel_nm_new == "(선택 안 함)":
-        st.session_state["hld_sel_nm"] = ""
-    else:
-        st.session_state["hld_sel_nm"] = _sel_nm_new
-
-    # _sel_nm 결정
-    _sel_nm = st.session_state.get("hld_sel_nm","")
 
     # ══════════════════════════════════════════════════════
     # 3. 분배금 요약 카드
@@ -1253,30 +1332,11 @@ def _render_holdings_tab(
         st.plotly_chart(fig_bar, use_container_width=True)
 
     # ══════════════════════════════════════════════════════
-    # 5. 종목 상세 분석 (행 클릭 → 인라인 표시)
+    # 5. 종목 상세 분석 (관심종목 상세 동일 구조)
     # ══════════════════════════════════════════════════════
     st.divider()
-    if not _sel_nm:
-        st.markdown(
-            "<div style='text-align:center;padding:20px;"
-            "color:rgba(255,255,255,0.35);font-size:0.85rem;'>"
-            "위 테이블에서 종목 행을 클릭하면 상세 분석이 표시됩니다</div>",
-            unsafe_allow_html=True,
-        )
-    if _sel_nm and len(disp_df) > 0:
-        # 선택된 종목 헤더
-        _acc_for_nm = str(disp_df[disp_df["종목명"]==_sel_nm]["계좌"].iloc[0]) if _sel_nm in disp_df["종목명"].values else "IRP"
-        _bst_h = _badge_css.get(_acc_for_nm, "")
-        _bc_h  = _acc_border.get(_acc_for_nm, "#AFA9EC")
-        st.markdown(
-            f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:12px;'>"
-            f"<span style='font-size:0.72rem;font-weight:700;padding:3px 10px;"
-            f"border-radius:5px;{_bst_h}'>{_acc_for_nm}</span>"
-            f"<span style='font-size:1.05rem;font-weight:500;'>{_sel_nm}</span>"
-            f"<span style='font-size:0.75rem;color:rgba(255,255,255,0.4);margin-left:auto;cursor:pointer;'>✕ 닫기(위 표 재클릭)</span>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+    st.markdown(f"**🔍 종목 상세 — {_sel_nm}**")
+    st.caption("위 테이블에서 행을 선택하면 해당 종목 상세 정보가 표시됩니다.")
 
     if _sel_nm and len(disp_df) > 0:
         _row     = disp_df[disp_df["종목명"] == _sel_nm].iloc[0]
@@ -2633,6 +2693,14 @@ def load_household(url: str, gid: str) -> pd.DataFrame:
         df["구분"] = df["구분"].astype(str).str.strip()
         df["카테고리"] = df["카테고리"].astype(str).str.strip()
         df["항목"]     = df["항목"].astype(str).str.strip()
+        # 특성 컬럼 (고정/변동) 파싱 — 없으면 빈 문자열
+        if "특성" in df.columns:
+            df["특성"] = df["특성"].astype(str).str.strip()
+        else:
+            df["특성"] = ""
+        # 비고 컬럼 정규화
+        if "비고" in df.columns:
+            df["비고"] = df["비고"].astype(str).str.strip()
         return df
     except Exception:
         return pd.DataFrame()

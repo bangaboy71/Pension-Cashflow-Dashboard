@@ -723,9 +723,7 @@ def _render_scenario_tax_prediction(
 
     if sc_df.empty or "과세표준" not in sc_df.columns:
         st.info(
-            "시나리오 시트에 **과세표준** 컬럼(K열)이 없거나 데이터가 없습니다.
-
-"
+            "시나리오 시트에 **과세표준** 컬럼(K열)이 없거나 데이터가 없습니다.\n\n"
             "시나리오 탭에 `과세표준` 컬럼을 추가하고 주당 과세표준을 입력하면 "
             "이 섹션에서 자동으로 연간 과세표준을 예측합니다."
         )
@@ -973,59 +971,54 @@ def _render_scenario_tax_prediction(
     if pension_tb > PENSION_INCOME_LIMIT:
         over = pension_tb - PENSION_INCOME_LIMIT
         strategy_items.append(("🚨 연금소득 한도 초과 예측", "#FF4B4B",
-            f"시나리오 기준 IRP·연금저축 연간 과세표준이 **{pension_tb/10000:.1f}만원**으로 "
-            f"한도를 **{over/10000:.1f}만원** 초과합니다. "
-            f"과세비율 높은 종목 축소 또는 ISA 전환이 필요합니다."))
+            f"시나리오 기준 IRP·연금저축 연간 과세표준이 {pension_tb/10000:.1f}만원으로 "
+            f"한도를 {over/10000:.1f}만원 초과합니다. "
+            "과세비율 높은 종목 축소 또는 ISA 전환이 필요합니다."))
     elif pension_tb > PENSION_INCOME_LIMIT * 0.9:
         strategy_items.append(("⚠️ 한도 90% 근접", "#FF8C00",
             f"연간 과세표준 예측 {pension_tb/10000:.1f}만원으로 한도의 "
             f"{pension_tb/PENSION_INCOME_LIMIT*100:.1f}%에 해당합니다. "
-            f"추가 매입 시 한도 초과 위험이 있습니다."))
+            "추가 매입 시 한도 초과 위험이 있습니다."))
     else:
         strategy_items.append(("✅ 한도 여유 있음", "#7dffb0",
             f"연간 과세표준 예측 {pension_tb/10000:.1f}만원 — "
-            f"한도 잔여 **{_pension_margin/10000:.1f}만원** "
+            f"한도 잔여 {_pension_margin/10000:.1f}만원 "
             f"(월 {_pension_margin/remaining_months/10000:.1f}만원 여유)"))
 
     # 매입 우선 종목 (과세비율 낮음)
     if not _buy_candidates.empty:
         _bc_list = ", ".join(_buy_candidates["종목명"].str[:10].tolist()[:3])
+        _bc_avg  = _buy_candidates["과세비율(%)"].mean()
+        _bc_cnt  = len(_buy_candidates)
         strategy_items.append(("📈 매입 우선 종목 (과세비율 낮음)", "#7dffb0",
-            f"**과세비율 30% 미만** 종목은 같은 분배금으로 과세표준이 낮아 절세 효과가 큽니다.
-
-"
-            f"우선 매입 후보: **{_bc_list}** 등 "
-            f"({len(_buy_candidates)}개 종목, 평균 과세비율 "
-            f"{_buy_candidates['과세비율(%)'].mean():.1f}%)"))
+            f"과세비율 30% 미만 종목은 같은 분배금으로 과세표준이 낮아 절세 효과가 큽니다. "
+            f"우선 매입 후보: {_bc_list} 등 "
+            f"({_bc_cnt}개 종목, 평균 과세비율 {_bc_avg:.1f}%)"))
 
     # 축소 검토 종목 (과세비율 높음)
     if not _reduce_candidates.empty:
         _rc_list = ", ".join(_reduce_candidates["종목명"].str[:10].tolist()[:3])
+        _rc_cnt  = len(_reduce_candidates)
         strategy_items.append(("📉 축소 검토 종목 (과세비율 높음)", "#FFD700",
-            f"**과세비율 80% 이상** 종목은 분배금 대부분이 과세표준에 반영됩니다. "
-            f"한도 여유가 부족하면 축소 또는 ISA 전환을 검토하세요.
-
-"
-            f"검토 후보: **{_rc_list}** 등 ({len(_reduce_candidates)}개 종목)"))
+            "과세비율 80% 이상 종목은 분배금 대부분이 과세표준에 반영됩니다. "
+            "한도 여유가 부족하면 축소 또는 ISA 전환을 검토하세요. "
+            f"검토 후보: {_rc_list} 등 ({_rc_cnt}개 종목)"))
 
     # ISA 전환 제안
     if not _isa_move_cands.empty:
         _im_list = ", ".join(_isa_move_cands["종목명"].str[:10].tolist()[:2])
         strategy_items.append(("💡 ISA 전환 검토 (IRP 내 저과세 종목)", "#87CEEB",
-            f"IRP 내 과세비율 50% 미만 종목은 ISA로 전환 시 비과세 혜택(연 200만원)을 받을 수 있습니다. "
-            f"단, ISA는 5년 의무 보유 조건을 확인하세요.
-
-"
-            f"전환 검토 후보: **{_im_list}** 등"))
+            "IRP 내 과세비율 50% 미만 종목은 ISA로 전환 시 비과세 혜택(연 200만원)을 받을 수 있습니다. "
+            "단, ISA는 5년 의무 보유 조건을 확인하세요. "
+            f"전환 검토 후보: {_im_list} 등"))
 
     # ISA 한도 관리
     isa_over = isa_dist - ISA_TAX_FREE_ANNUAL
     if isa_over > 0:
         strategy_items.append(("⚠️ ISA 비과세 한도 초과 예측", "#FFD700",
-            f"ISA 연간 분배금이 **{isa_dist/10000:.1f}만원**으로 비과세 한도(200만원)를 "
-            f"**{isa_over/10000:.1f}만원** 초과 예측됩니다. "
-            f"초과분은 9.9% 분리과세됩니다."))
-
+            f"ISA 연간 분배금이 {isa_dist/10000:.1f}만원으로 비과세 한도(200만원)를 "
+            f"{isa_over/10000:.1f}만원 초과 예측됩니다. "
+            "초과분은 9.9% 분리과세됩니다."))
     for _title, _color, _body in strategy_items:
         st.markdown(
             f"<div style='background:rgba(255,255,255,0.03);border-left:4px solid {_color};"

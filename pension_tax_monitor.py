@@ -629,16 +629,29 @@ def _render_estimation_mode(
         return
 
     # ── 수치 컬럼 정규화 ─────────────────────────────────
-    for _nc in ["수량","주당분배금","과세표준","평가액","원금"]:
+    for _nc in ["시나리오수량","수량","주당분배금","과세표준","평가액","원금","현재가","매수가"]:
         if _nc in sc_sub.columns:
             sc_sub[_nc] = pd.to_numeric(
                 sc_sub[_nc].astype(str).str.replace(",",""), errors="coerce"
             ).fillna(0)
 
-    # 원금 없으면 평가액 사용
-    if "원금" not in sc_sub.columns or sc_sub.get("원금", pd.Series([0])).sum() == 0:
-        if "평가액" in sc_sub.columns:
+    # 수량 우선순위: 시나리오수량 > 수량 > 0
+    # 시나리오 추산에는 실제 목표 수량(시나리오수량)이 맞음
+    if "시나리오수량" in sc_sub.columns and sc_sub["시나리오수량"].sum() > 0:
+        sc_sub["_qty"] = sc_sub["시나리오수량"]
+    elif "수량" in sc_sub.columns and sc_sub["수량"].sum() > 0:
+        sc_sub["_qty"] = sc_sub["수량"]
+    else:
+        sc_sub["_qty"] = 0
+
+    # 원금: 수량×매수가(또는 현재가) 또는 평가액
+    if "원금" not in sc_sub.columns or sc_sub["원금"].sum() == 0:
+        if "평가액" in sc_sub.columns and sc_sub["평가액"].sum() > 0:
             sc_sub["원금"] = sc_sub["평가액"]
+        elif "매수가" in sc_sub.columns:
+            sc_sub["원금"] = sc_sub["_qty"] * sc_sub["매수가"]
+        elif "현재가" in sc_sub.columns:
+            sc_sub["원금"] = sc_sub["_qty"] * sc_sub["현재가"]
 
     # 과세표준 컬럼 없으면 0
     if "과세표준" not in sc_sub.columns:
@@ -680,7 +693,8 @@ def _render_estimation_mode(
             nm       = str(row.get("종목명","")).strip()
             acc_nm   = str(row.get("계좌","IRP")).strip()
             src      = str(row.get("_source","퇴직금"))
-            qty_orig = int(row.get("수량", 0))
+            # _qty: 시나리오수량 우선 적용된 값
+            qty_orig = int(row.get("_qty", row.get("시나리오수량", row.get("수량", 0))))
             tb_orig  = int(row.get("과세표준", 0))
             freq     = int(row.get("_freq", 12))
             in_limit = "✅ 한도 포함" if (acc_nm=="연금저축" or src=="개인납입") else "➖ 한도 제외(퇴직금)"
@@ -693,7 +707,7 @@ def _render_estimation_mode(
 
     # 각 종목 행 렌더링 (expander 내부)
     _updated_rows = []
-    with st.expander("종목별 수량·과세표준 조정 (클릭하여 펼치기)", expanded=False):
+    with st.expander("종목별 수량·과세표준 조정", expanded=True):
         st.caption("수량 조정은 매입·매도 시뮬레이션, 과세표준 조정은 운용사 공시값 변경 시 활용하세요.")
         for _i, d in enumerate(_adj_data):
             col_nm, col_qty, col_tb, col_info = st.columns([3,2,2,3])
@@ -727,18 +741,21 @@ def _render_estimation_mode(
                 )
             _updated_rows.append({**d, "qty": adj_qty, "tb": adj_tb})
 
-    # 조정 없으면 원본값 사용
+    # 조정 없으면 원본값 사용 (시나리오수량 우선)
     if not _updated_rows:
         for idx2, row in pension_rows.iterrows():
+            _qty_v = int(row.get("_qty", row.get("시나리오수량", row.get("수량", 0))))
+            _src_v = str(row.get("_source","퇴직금"))
+            _acc_v = str(row.get("계좌","IRP"))
             _updated_rows.append({
-                "nm":  str(row.get("종목명","")),
-                "acc": str(row.get("계좌","IRP")),
-                "src": str(row.get("_source","퇴직금")),
-                "qty": int(row.get("수량",0)),
-                "tb":  int(row.get("과세표준",0)),
-                "freq":int(row.get("_freq",12)),
-                "in_limit": "➖ 한도 제외(퇴직금)" if str(row.get("_source","퇴직금"))=="퇴직금" else "✅ 한도 포함",
-                "badge_c": "#87CEEB",
+                "nm":       str(row.get("종목명","")),
+                "acc":      _acc_v,
+                "src":      _src_v,
+                "qty":      _qty_v,
+                "tb":       int(row.get("과세표준",0)),
+                "freq":     int(row.get("_freq",12)),
+                "in_limit": "✅ 한도 포함" if (_acc_v=="연금저축" or _src_v=="개인납입") else "➖ 한도 제외(퇴직금)",
+                "badge_c":  "#7dffb0" if (_acc_v=="연금저축" or _src_v=="개인납입") else "#87CEEB",
             })
 
     # ── 과세표준 집계 (원천별 분리) ───────────────────────
@@ -755,9 +772,9 @@ def _render_estimation_mode(
         elif d["acc"] == "연금저축":
             ps_monthly_tb += monthly_tb
 
-    # ISA·일반은 시나리오 원본값 사용
-    isa_monthly_tb = float(isa_rows["수량"].mul(isa_rows["과세표준"]).sum()) if not isa_rows.empty else 0.0
-    gen_monthly_tb = float(gen_rows["수량"].mul(gen_rows["과세표준"]).sum()) if not gen_rows.empty else 0.0
+    # ISA·일반은 _qty(시나리오수량 우선) 사용
+    isa_monthly_tb = float(isa_rows["_qty"].mul(isa_rows["과세표준"]).sum()) if not isa_rows.empty and "_qty" in isa_rows.columns else 0.0
+    gen_monthly_tb = float(gen_rows["_qty"].mul(gen_rows["과세표준"]).sum()) if not gen_rows.empty and "_qty" in gen_rows.columns else 0.0
 
     # 연간 환산
     irp_retire_annual   = irp_retire_monthly  * 12
@@ -845,11 +862,11 @@ def _render_estimation_mode(
             f"<td style='{_td}color:{in_c};font-weight:600;'>{in_limit_txt}</td></tr>"
         )
 
-    # ISA·일반 행 추가 (조정 없이 원본)
+    # ISA·일반 행 추가 (_qty 기준)
     for _df2, _acc2 in [(isa_rows, "ISA"), (gen_rows, "일반")]:
         for _, row in _df2.iterrows():
             nm2 = str(row.get("종목명",""))
-            qty2 = int(row.get("수량",0))
+            qty2 = int(row.get("_qty", row.get("시나리오수량", row.get("수량",0))))
             tb2  = int(row.get("과세표준",0))
             bst2 = _acc_badge.get(_acc2,"")
             rows_html.append(

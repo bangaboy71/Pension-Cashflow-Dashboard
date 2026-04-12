@@ -5231,12 +5231,7 @@ with _main_tab8:
         "gen_monthly":    _gen_monthly_income,
         "ps_monthly":     ps_income,
         "target_monthly": target_monthly,
-        # ★ 시나리오 과세 시뮬레이션용
-        "sc_tax_data": {
-            "sc_df":    sc_df,
-            "sc_names": sc_names,
-        },
-        "sc_df":    sc_df,
-        "sc_names": sc_names,
+        "sc_df":    sc_df    if "sc_df"    in dir() else pd.DataFrame(),
+        "sc_names": sc_names if "sc_names" in dir() else [],
     }
     render_tax_monitor_tab(_tax_ctx)

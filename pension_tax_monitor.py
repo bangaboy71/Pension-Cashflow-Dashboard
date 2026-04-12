@@ -641,13 +641,17 @@ def _render_estimation_mode(
     else:
         sc_sub["_freq"] = 12
 
-    # 원천 분류 (메모 컬럼 기반)
+    # 계좌 컬럼 보정 — 없으면 빈 문자열로 채움
+    if "계좌" not in sc_sub.columns:
+        sc_sub["계좌"] = ""
+
+    # 원천 분류 (메모/원천구분 컬럼 우선, 없으면 계좌명 기반)
     src_col = "메모" if "메모" in sc_sub.columns else ("원천구분" if "원천구분" in sc_sub.columns else None)
     if src_col:
         sc_sub["_source"] = sc_sub[src_col].apply(_classify_source)
     else:
         sc_sub["_source"] = sc_sub["계좌"].apply(
-            lambda x: "개인납입" if x in ("연금저축","ISA","일반") else "퇴직금"
+            lambda x: "개인납입" if str(x).strip() in ("연금저축","ISA","일반") else "퇴직금"
         )
 
     # ── 종목별 수량·과세표준 조정 UI ─────────────────────

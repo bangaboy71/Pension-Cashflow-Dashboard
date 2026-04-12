@@ -262,15 +262,11 @@ def render_tax_monitor_tab(tax_ctx: dict) -> None:
     gen_monthly    = tax_ctx.get("gen_monthly", 0.0)
     ps_monthly     = tax_ctx.get("ps_monthly", 0.0)
     target_monthly = tax_ctx.get("target_monthly", 6_600_000)
-    sc_tax_data    = tax_ctx.get("sc_tax_data", {})
-    sc_df_ctx      = tax_ctx.get("sc_df", pd.DataFrame())
-    sc_names_ctx   = tax_ctx.get("sc_names", [])
-    # sc_tax_data에 sc_df/sc_names 병합 (두 경로 모두 지원)
-    if not sc_tax_data.get("sc_df", pd.DataFrame()).empty == True:
-        pass
-    else:
-        sc_tax_data["sc_df"]    = sc_df_ctx
-        sc_tax_data["sc_names"] = sc_names_ctx
+    # ★ 시나리오 데이터 — sc_df/sc_names 직접 수신 (sc_tax_data 경유도 지원)
+    _sc_tax_data   = tax_ctx.get("sc_tax_data", {})
+    sc_df_ctx      = tax_ctx.get("sc_df", _sc_tax_data.get("sc_df",  pd.DataFrame()))
+    sc_names_ctx   = tax_ctx.get("sc_names", _sc_tax_data.get("sc_names", []))
+    sc_tax_data    = {"sc_df": sc_df_ctx, "sc_names": sc_names_ctx}
 
     st.markdown(
         "<h3 style='margin-bottom:0.2rem;'>🏦 과세 금융소득 관리 대시보드</h3>"
@@ -589,15 +585,30 @@ def _render_estimation_mode(
     remaining_months = max(1, 12 - current_month + 1)
 
     # ── 시나리오 선택 ────────────────────────────────────
-    if not sc_df.empty and "시나리오명" in sc_df.columns:
-        _opts = sc_names if sc_names else sc_df["시나리오명"].unique().tolist()
-        _sel  = st.selectbox("시뮬레이션 시나리오", _opts,
-                             key="est_sc_sel",
-                             help="시나리오 탭의 포트폴리오로 연간 과세표준을 추산합니다")
+    sc_df    = sc_data.get("sc_df",    pd.DataFrame())
+    sc_names = sc_data.get("sc_names", [])
+
+    # sc_df 유효성 검사
+    _sc_valid = (
+        isinstance(sc_df, pd.DataFrame)
+        and not sc_df.empty
+        and "시나리오명" in sc_df.columns
+    )
+
+    if _sc_valid:
+        _opts = sc_names if sc_names else sc_df["시나리오명"].dropna().unique().tolist()
+        _sel  = st.selectbox(
+            "시뮬레이션 시나리오", _opts,
+            key="est_sc_sel",
+            help="시나리오 탭의 포트폴리오로 연간 과세표준을 추산합니다",
+        )
         sc_sub = sc_df[sc_df["시나리오명"] == _sel].copy()
-    elif not sc_df.empty:
+    elif isinstance(sc_df, pd.DataFrame) and not sc_df.empty:
         sc_sub = sc_df.copy()
         _sel   = "기본 포트폴리오"
+        # 시나리오명 컬럼 보정
+        if "시나리오명" not in sc_sub.columns:
+            sc_sub["시나리오명"] = "현재안"
     else:
         sc_sub = pd.DataFrame()
         _sel   = ""

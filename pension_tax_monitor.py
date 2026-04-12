@@ -262,9 +262,15 @@ def render_tax_monitor_tab(tax_ctx: dict) -> None:
     gen_monthly    = tax_ctx.get("gen_monthly", 0.0)
     ps_monthly     = tax_ctx.get("ps_monthly", 0.0)
     target_monthly = tax_ctx.get("target_monthly", 6_600_000)
-    sc_tax_data    = tax_ctx.get("sc_tax_data",  {})
-    sc_df          = tax_ctx.get("sc_df",  pd.DataFrame())
-    sc_names       = tax_ctx.get("sc_names", [])
+    sc_tax_data    = tax_ctx.get("sc_tax_data", {})
+    sc_df_ctx      = tax_ctx.get("sc_df", pd.DataFrame())
+    sc_names_ctx   = tax_ctx.get("sc_names", [])
+    # sc_tax_data에 sc_df/sc_names 병합 (두 경로 모두 지원)
+    if not sc_tax_data.get("sc_df", pd.DataFrame()).empty == True:
+        pass
+    else:
+        sc_tax_data["sc_df"]    = sc_df_ctx
+        sc_tax_data["sc_names"] = sc_names_ctx
 
     st.markdown(
         "<h3 style='margin-bottom:0.2rem;'>🏦 과세 금융소득 관리 대시보드</h3>"
@@ -295,6 +301,7 @@ def render_tax_monitor_tab(tax_ctx: dict) -> None:
         _render_estimation_mode(
             irp_monthly, isa_monthly, gen_monthly, ps_monthly,
             current_month, target_monthly,
+            sc_tax_data=sc_tax_data,
         )
         st.divider()
         _render_sheet_guide()
@@ -537,18 +544,7 @@ def render_tax_monitor_tab(tax_ctx: dict) -> None:
             )
             st.plotly_chart(fig_tax_rate, use_container_width=True)
 
-    # ── 6. 시나리오 과세표준 예측 섹션 ★ NEW ─────────────
-    st.divider()
-    _render_scenario_tax_prediction(
-        sc_tax_data=sc_tax_data,
-        sc_df=sc_df,
-        sc_names=sc_names,
-        current_month=current_month,
-        tax_result=tax_result,
-        sim=sim,
-    )
-
-    # ── 7. 절세 전략 조언 ───────────────────────────────
+    # ── 6. 절세 전략 조언 ───────────────────────────────
     st.divider()
     _render_tax_strategy(tax_result, sim, target_monthly)
 
@@ -558,83 +554,403 @@ def render_tax_monitor_tab(tax_ctx: dict) -> None:
 
 
 # ════════════════════════════════════════════════════════
-# 추산 모드 (시트 미연동 시)
+# 추산 모드 (시트 미연동 시) — 시나리오 종목별 상세 추산
 # ════════════════════════════════════════════════════════
+def _classify_source(memo: str) -> str:
+    """메모/원천구분 컬럼에서 퇴직금/개인납입 분류"""
+    m = str(memo).strip()
+    if any(k in m for k in ["개인","납입","세액공제"]):
+        return "개인납입"
+    return "퇴직금"  # IRP 기본값 퇴직금
+
+
 def _render_estimation_mode(
     irp_monthly, isa_monthly, gen_monthly, ps_monthly,
     current_month, target_monthly,
+    sc_tax_data: dict = None,
 ):
-    """현재 월 분배금으로 연간 과세소득 추산"""
-    st.markdown("#### 📐 연간 과세소득 추산 (현재 분배금 기준)")
+    """
+    시나리오 종목별 수량×과세표준 기반 연간 과세소득 시뮬레이션.
 
-    # 슬라이더: 과세비율 조정
-    st.caption("커버드콜 ETF는 월마다 과세표준 비율이 다릅니다. 평균 과세비율을 조정하세요.")
+    세법 핵심 (소득세법 §129 ①5호):
+      - IRP 퇴직금 원천: 퇴직소득세 감면(0.76%/1.1%) → 연 1,500만원 한도 제외
+      - IRP 개인납입+운용수익, 연금저축: 연금소득세(5.5%) → 1,500만원 한도 포함
+    """
+    st.markdown("#### 📐 연간 과세소득 시뮬레이션 (종목별 수량·과세표준 기준)")
+    st.caption(
+        "시나리오 시트의 **수량 × 주당 과세표준**으로 계산합니다. "
+        "퇴직금 원천 분배금은 퇴직소득세(0.76~1.1%)로 분리과세되므로 "
+        "연금소득 1,500만원 한도에 **포함되지 않습니다.**"
+    )
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        irp_tax_pct = st.slider("IRP 과세비율 (%)", 0, 100, 80, 5,
-                                key="est_irp_pct",
-                                help="분배금 중 과세표준이 되는 비율 (커버드콜 평균 약 70~90%)")
-        ps_tax_pct  = st.slider("연금저축 과세비율 (%)", 0, 100, 80, 5,
-                                key="est_ps_pct")
-    with col_b:
-        isa_tax_pct = st.slider("ISA 과세비율 (%)", 0, 100, 100, 5,
-                                key="est_isa_pct",
-                                help="ISA는 분배금 전액이 분배금 기준이지만 200만원 비과세")
-        gen_tax_pct = st.slider("일반계좌 과세비율 (%)", 0, 100, 90, 5,
-                                key="est_gen_pct")
+    sc_data = sc_tax_data or {}
+    sc_df   = sc_data.get("sc_df", pd.DataFrame())
+    sc_names= sc_data.get("sc_names", [])
+    remaining_months = max(1, 12 - current_month + 1)
 
-    # 잔여 월 기준 연간 추산
-    remaining_months = 12 - current_month + 1
-    elapsed_months   = current_month - 1
+    # ── 시나리오 선택 ────────────────────────────────────
+    if not sc_df.empty and "시나리오명" in sc_df.columns:
+        _opts = sc_names if sc_names else sc_df["시나리오명"].unique().tolist()
+        _sel  = st.selectbox("시뮬레이션 시나리오", _opts,
+                             key="est_sc_sel",
+                             help="시나리오 탭의 포트폴리오로 연간 과세표준을 추산합니다")
+        sc_sub = sc_df[sc_df["시나리오명"] == _sel].copy()
+    elif not sc_df.empty:
+        sc_sub = sc_df.copy()
+        _sel   = "기본 포트폴리오"
+    else:
+        sc_sub = pd.DataFrame()
+        _sel   = ""
 
-    irp_ps_annual_est = (irp_monthly * irp_tax_pct / 100 + ps_monthly * ps_tax_pct / 100) * 12
-    isa_annual_est    = isa_monthly * 12
-    gen_annual_est    = gen_monthly * gen_tax_pct / 100 * 12
+    # ── 시나리오 데이터 없으면 기본 슬라이더 모드 폴백 ──
+    if sc_sub.empty:
+        st.info("시나리오 시트 데이터가 없습니다. 현재 분배금 기준 단순 추산을 표시합니다.")
+        _irp_tb = irp_monthly * 0.6 * 12
+        _ps_tb  = ps_monthly  * 0.8 * 12
+        _in_limit = _ps_tb  # 연금저축만 한도 포함 (단순 추산)
+        r1,r2,r3,r4 = st.columns(4)
+        r1.metric("연금소득 한도 포함 추산", f"{_in_limit/10000:.1f}만원",
+                  help="연금저축 분배금의 80% 기준 (과세표준 입력 시 정확해짐)")
+        r2.metric("한도 잔여", f"{max(0,PENSION_INCOME_LIMIT-_in_limit)/10000:.1f}만원")
+        r3.metric("IRP 퇴직금 추산 (한도 제외)", f"{_irp_tb/10000:.1f}만원",
+                  help="퇴직소득세 분리과세 — 1,500만원 한도 무관")
+        r4.metric("월 여유", f"{max(0,PENSION_INCOME_LIMIT-_in_limit)/remaining_months/10000:.1f}만원/월")
+        return
 
-    isa_taxfree_est   = min(isa_annual_est, ISA_TAX_FREE_ANNUAL)
-    isa_taxable_est   = max(0, isa_annual_est - ISA_TAX_FREE_ANNUAL)
+    # ── 수치 컬럼 정규화 ─────────────────────────────────
+    for _nc in ["수량","주당분배금","과세표준","평가액","원금"]:
+        if _nc in sc_sub.columns:
+            sc_sub[_nc] = pd.to_numeric(
+                sc_sub[_nc].astype(str).str.replace(",",""), errors="coerce"
+            ).fillna(0)
 
-    p_color, p_emoji, p_label = _status(irp_ps_annual_est, PENSION_INCOME_LIMIT)
-    g_color, g_emoji, g_label = _status(gen_annual_est, FINANCIAL_INCOME_LIMIT)
+    # 원금 없으면 평가액 사용
+    if "원금" not in sc_sub.columns or sc_sub.get("원금", pd.Series([0])).sum() == 0:
+        if "평가액" in sc_sub.columns:
+            sc_sub["원금"] = sc_sub["평가액"]
+
+    # 과세표준 컬럼 없으면 0
+    if "과세표준" not in sc_sub.columns:
+        sc_sub["과세표준"] = 0
+
+    # 분배주기 반영
+    if "분배주기" in sc_sub.columns:
+        sc_sub["_freq"] = sc_sub["분배주기"].astype(str).apply(
+            lambda x: 1 if "년" in x else 12
+        )
+    else:
+        sc_sub["_freq"] = 12
+
+    # 원천 분류 (메모 컬럼 기반)
+    src_col = "메모" if "메모" in sc_sub.columns else ("원천구분" if "원천구분" in sc_sub.columns else None)
+    if src_col:
+        sc_sub["_source"] = sc_sub[src_col].apply(_classify_source)
+    else:
+        sc_sub["_source"] = sc_sub["계좌"].apply(
+            lambda x: "개인납입" if x in ("연금저축","ISA","일반") else "퇴직금"
+        )
+
+    # ── 종목별 수량·과세표준 조정 UI ─────────────────────
+    st.markdown("**⚙️ 종목별 수량·과세표준 조정**")
+    st.caption("수량 또는 주당 과세표준을 변경하면 과세표준이 실시간으로 재계산됩니다.")
+
+    _adj_data = []
+    pension_rows = sc_sub[sc_sub["계좌"].isin(["IRP","연금저축"])].copy()
+    isa_rows     = sc_sub[sc_sub["계좌"] == "ISA"].copy()
+    gen_rows     = sc_sub[sc_sub["계좌"] == "일반"].copy()
+
+    # 조정 테이블 — IRP·연금저축만 표시 (한도 관련)
+    if not pension_rows.empty:
+        for idx2, row in pension_rows.iterrows():
+            nm       = str(row.get("종목명","")).strip()
+            acc_nm   = str(row.get("계좌","IRP")).strip()
+            src      = str(row.get("_source","퇴직금"))
+            qty_orig = int(row.get("수량", 0))
+            tb_orig  = int(row.get("과세표준", 0))
+            freq     = int(row.get("_freq", 12))
+            in_limit = "✅ 한도 포함" if (acc_nm=="연금저축" or src=="개인납입") else "➖ 한도 제외(퇴직금)"
+            badge_c  = "#7dffb0" if "포함" in in_limit else "#87CEEB"
+            _adj_data.append({
+                "nm": nm, "acc": acc_nm, "src": src,
+                "qty_orig": qty_orig, "tb_orig": tb_orig,
+                "freq": freq, "in_limit": in_limit, "badge_c": badge_c,
+            })
+
+    # 각 종목 행 렌더링 (expander 내부)
+    _updated_rows = []
+    with st.expander("종목별 수량·과세표준 조정 (클릭하여 펼치기)", expanded=False):
+        st.caption("수량 조정은 매입·매도 시뮬레이션, 과세표준 조정은 운용사 공시값 변경 시 활용하세요.")
+        for _i, d in enumerate(_adj_data):
+            col_nm, col_qty, col_tb, col_info = st.columns([3,2,2,3])
+            with col_nm:
+                st.markdown(
+                    f"<div style='padding:6px 0;font-size:0.82rem;'>"
+                    f"<span style='font-size:0.7rem;background:rgba(255,255,255,0.08);"
+                    f"padding:1px 6px;border-radius:3px;margin-right:4px;'>{d['acc']}</span>"
+                    f"{d['nm'][:20]}</div>",
+                    unsafe_allow_html=True,
+                )
+            with col_qty:
+                adj_qty = st.number_input(
+                    "수량", min_value=0, max_value=100000,
+                    value=d["qty_orig"], step=100,
+                    key=f"est_qty_{_i}",
+                    label_visibility="collapsed",
+                )
+            with col_tb:
+                adj_tb = st.number_input(
+                    "주당과세표준", min_value=0, max_value=10000,
+                    value=d["tb_orig"], step=1,
+                    key=f"est_tb_{_i}",
+                    label_visibility="collapsed",
+                )
+            with col_info:
+                st.markdown(
+                    f"<div style='padding:6px 0;font-size:0.75rem;color:{d["badge_c"]};'>"
+                    f"{d['in_limit']}</div>",
+                    unsafe_allow_html=True,
+                )
+            _updated_rows.append({**d, "qty": adj_qty, "tb": adj_tb})
+
+    # 조정 없으면 원본값 사용
+    if not _updated_rows:
+        for idx2, row in pension_rows.iterrows():
+            _updated_rows.append({
+                "nm":  str(row.get("종목명","")),
+                "acc": str(row.get("계좌","IRP")),
+                "src": str(row.get("_source","퇴직금")),
+                "qty": int(row.get("수량",0)),
+                "tb":  int(row.get("과세표준",0)),
+                "freq":int(row.get("_freq",12)),
+                "in_limit": "➖ 한도 제외(퇴직금)" if str(row.get("_source","퇴직금"))=="퇴직금" else "✅ 한도 포함",
+                "badge_c": "#87CEEB",
+            })
+
+    # ── 과세표준 집계 (원천별 분리) ───────────────────────
+    irp_retire_monthly  = 0.0  # 퇴직금 → 한도 제외
+    irp_personal_monthly= 0.0  # 개인납입 → 한도 포함
+    ps_monthly_tb       = 0.0  # 연금저축 → 한도 포함
+
+    for d in _updated_rows:
+        monthly_tb = d["qty"] * d["tb"]  # 월 과세표준
+        if d["acc"] == "IRP" and d["src"] == "퇴직금":
+            irp_retire_monthly += monthly_tb
+        elif d["acc"] == "IRP" and d["src"] == "개인납입":
+            irp_personal_monthly += monthly_tb
+        elif d["acc"] == "연금저축":
+            ps_monthly_tb += monthly_tb
+
+    # ISA·일반은 시나리오 원본값 사용
+    isa_monthly_tb = float(isa_rows["수량"].mul(isa_rows["과세표준"]).sum()) if not isa_rows.empty else 0.0
+    gen_monthly_tb = float(gen_rows["수량"].mul(gen_rows["과세표준"]).sum()) if not gen_rows.empty else 0.0
+
+    # 연간 환산
+    irp_retire_annual   = irp_retire_monthly  * 12
+    irp_personal_annual = irp_personal_monthly* 12
+    ps_annual_tb        = ps_monthly_tb       * 12
+    isa_annual_tb       = isa_monthly_tb      * 12
+    gen_annual_tb       = gen_monthly_tb      * 12
+
+    # 한도 포함 합계 (핵심)
+    pension_in_limit = irp_personal_annual + ps_annual_tb
+
+    # ISA 비과세·과세 분리
+    isa_taxfree  = min(isa_annual_tb, ISA_TAX_FREE_ANNUAL)
+    isa_taxable  = max(0, isa_annual_tb - ISA_TAX_FREE_ANNUAL)
+
+    # ── 요약 카드 ────────────────────────────────────────
+    st.divider()
+    st.markdown("**📊 과세표준 집계 요약**")
 
     r1, r2, r3, r4 = st.columns(4)
+    _pc, _, _ = _status(pension_in_limit, PENSION_INCOME_LIMIT)
     r1.metric(
-        "IRP·연금저축 연간 과세 추산",
-        f"{irp_ps_annual_est/10000:.1f}만원",
-        delta=f"한도 대비 {irp_ps_annual_est/PENSION_INCOME_LIMIT*100:.1f}%",
-        delta_color="inverse" if irp_ps_annual_est > PENSION_INCOME_LIMIT * WARN_RATIO else "normal",
+        "연금소득 한도 포함 (개인납입·연금저축)",
+        f"{pension_in_limit/10000:.1f}만원",
+        delta=f"한도 대비 {pension_in_limit/PENSION_INCOME_LIMIT*100:.1f}%",
+        delta_color="inverse" if pension_in_limit > PENSION_INCOME_LIMIT * WARN_RATIO else "normal",
+        help="IRP 개인납입+운용수익 + 연금저축 (소득세법 §129 ①5호 연금소득세 대상)",
     )
     r2.metric(
         "한도 잔여",
-        f"{max(0, PENSION_INCOME_LIMIT - irp_ps_annual_est)/10000:.1f}만원",
-        help="연 1,500만원 기준",
+        f"{max(0, PENSION_INCOME_LIMIT - pension_in_limit)/10000:.1f}만원",
+        delta=f"월 {max(0, PENSION_INCOME_LIMIT - pension_in_limit)/remaining_months/10000:.1f}만원 여유",
+        help=f"남은 {remaining_months}개월 균등 기준",
     )
     r3.metric(
-        "일반계좌 금융소득 추산",
-        f"{gen_annual_est/10000:.1f}만원",
-        delta=f"한도 대비 {gen_annual_est/FINANCIAL_INCOME_LIMIT*100:.1f}%",
-        delta_color="inverse" if gen_annual_est > FINANCIAL_INCOME_LIMIT * WARN_RATIO else "normal",
+        "IRP 퇴직금 연간 과세표준 (한도 제외)",
+        f"{irp_retire_annual/10000:.1f}만원",
+        help="퇴직소득세 0.76~1.1% 분리과세 — 연금소득 1,500만원 한도와 무관",
     )
     r4.metric(
-        "월 최대 IRP 인출 가능",
-        f"{max(0, PENSION_INCOME_LIMIT - irp_ps_annual_est) / max(remaining_months,1) / 10000:.1f}만원/월",
-        help="잔여 한도 ÷ 남은 개월 (과세비율 반영)",
+        "ISA 과세 (비과세 초과분)",
+        f"{isa_taxable/10000:.1f}만원",
+        delta=f"비과세 {isa_taxfree/10000:.1f}만원 적용 후",
+        help="ISA 연 200만원 비과세 초과분 9.9% 분리과세",
     )
 
-    # 경고 배너
-    if irp_ps_annual_est > PENSION_INCOME_LIMIT:
-        st.error(
-            f"🚨 연간 추산 기준 IRP·연금저축 연금소득이 한도를 "
-            f"**{(irp_ps_annual_est - PENSION_INCOME_LIMIT)/10000:.1f}만원** 초과할 것으로 예상됩니다. "
-            f"이번달부터 월 인출액을 **{PENSION_INCOME_LIMIT/12/10000:.1f}만원** 이하로 줄이세요."
+    st.divider()
+
+    # ── 종목별 상세 테이블 ──────────────────────────────
+    st.markdown("**📋 종목별 과세표준 상세**")
+
+    _acc_badge = {
+        "IRP":    "background:rgba(135,206,235,0.15);color:#87CEEB;",
+        "ISA":    "background:rgba(125,255,176,0.15);color:#7dffb0;",
+        "연금저축": "background:rgba(255,215,0,0.15);color:#FFD700;",
+        "일반":   "background:rgba(175,169,236,0.15);color:#AFA9EC;",
+    }
+    _th = ("background:rgba(255,255,255,0.06);padding:7px 10px;font-size:0.75rem;"
+           "font-weight:600;color:rgba(255,255,255,0.5);border-bottom:1px solid rgba(255,255,255,0.1);"
+           "white-space:nowrap;")
+    _th_r = _th + "text-align:right;"
+    _td   = "padding:6px 10px;font-size:0.82rem;border-bottom:0.5px solid rgba(255,255,255,0.06);"
+    _td_r = _td + "text-align:right;"
+
+    rows_html = []
+    # IRP·연금저축 — 조정 데이터 반영
+    for d in _updated_rows:
+        monthly_tb = d["qty"] * d["tb"]
+        annual_tb  = monthly_tb * 12
+        monthly_dist = d["qty"] * next(
+            (int(r.get("주당분배금",0)) for _,r in pension_rows.iterrows() if str(r.get("종목명",""))==d["nm"]),
+            0
         )
-    elif irp_ps_annual_est > PENSION_INCOME_LIMIT * WARN_RATIO:
+        tax_pct = (d["tb"] / (monthly_dist // d["qty"]) * 100) if d["qty"] > 0 and monthly_dist > 0 else 0
+        in_limit_txt = "포함" if "포함" in d.get("in_limit","") else "제외(퇴직금)"
+        in_c = "#7dffb0" if "포함" in in_limit_txt else "#87CEEB"
+        bst  = _acc_badge.get(d["acc"],"")
+        rows_html.append(
+            f"<tr><td style='{_td}'><span style='font-size:0.7rem;font-weight:700;padding:1px 6px;border-radius:3px;{bst}'>{d['acc']}</span></td>"
+            f"<td style='{_td}'>{d['nm'][:24]}</td>"
+            f"<td style='{_td_r}'>{d['qty']:,}</td>"
+            f"<td style='{_td_r}'>{d['tb']:,}</td>"
+            f"<td style='{_td_r}'>{monthly_tb:,.0f}</td>"
+            f"<td style='{_td_r}'>{annual_tb/10000:.2f}만</td>"
+            f"<td style='{_td}color:{in_c};font-weight:600;'>{in_limit_txt}</td></tr>"
+        )
+
+    # ISA·일반 행 추가 (조정 없이 원본)
+    for _df2, _acc2 in [(isa_rows, "ISA"), (gen_rows, "일반")]:
+        for _, row in _df2.iterrows():
+            nm2 = str(row.get("종목명",""))
+            qty2 = int(row.get("수량",0))
+            tb2  = int(row.get("과세표준",0))
+            bst2 = _acc_badge.get(_acc2,"")
+            rows_html.append(
+                f"<tr><td style='{_td}'><span style='font-size:0.7rem;font-weight:700;padding:1px 6px;border-radius:3px;{bst2}'>{_acc2}</span></td>"
+                f"<td style='{_td}'>{nm2[:24]}</td>"
+                f"<td style='{_td_r}'>{qty2:,}</td>"
+                f"<td style='{_td_r}'>{tb2:,}</td>"
+                f"<td style='{_td_r}'>{qty2*tb2:,.0f}</td>"
+                f"<td style='{_td_r}'>{qty2*tb2*12/10000:.2f}만</td>"
+                f"<td style='{_td}color:#7dffb0;'>비과세200만</td></tr>"
+            )
+
+    tbl = (
+        "<div style='overflow-x:auto;border:1px solid rgba(255,255,255,0.1);border-radius:8px;'>"
+        "<table style='width:100%;border-collapse:collapse;'><thead><tr>"
+        f"<th style='{_th}'>계좌</th>"
+        f"<th style='{_th}'>종목명</th>"
+        f"<th style='{_th_r}'>수량</th>"
+        f"<th style='{_th_r}'>주당과세표준</th>"
+        f"<th style='{_th_r}'>월 과세표준</th>"
+        f"<th style='{_th_r}'>연 과세표준</th>"
+        f"<th style='{_th}'>한도 구분</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(rows_html)}</tbody></table></div>"
+    )
+    st.markdown(tbl, unsafe_allow_html=True)
+
+    st.divider()
+
+    # ── 한도 시각화 ─────────────────────────────────────
+    col_g1, col_g2 = st.columns(2)
+    with col_g1:
+        st.plotly_chart(
+            _gauge_fig(pension_in_limit, PENSION_INCOME_LIMIT,
+                       "연금소득 한도 포함<br>(IRP개인납입+연금저축)"),
+            use_container_width=True,
+        )
+        _pc2, _pe2, _pl2 = _status(pension_in_limit, PENSION_INCOME_LIMIT)
+        st.markdown(
+            f"<div style='text-align:center;font-size:0.82rem;'>"
+            f"{_pe2} <b style='color:{_pc2};'>{_pl2}</b> — "
+            f"잔여 <b>{max(0,PENSION_INCOME_LIMIT-pension_in_limit)/10000:.0f}만원</b> "
+            f"/ 월 <b>{max(0,PENSION_INCOME_LIMIT-pension_in_limit)/remaining_months/10000:.1f}만원</b></div>",
+            unsafe_allow_html=True,
+        )
+    with col_g2:
+        fig_bar = go.Figure()
+        cats   = ["IRP 퇴직금(한도 제외)", "IRP 개인납입(한도 포함)", "연금저축(한도 포함)"]
+        vals   = [irp_retire_annual/10000, irp_personal_annual/10000, ps_annual_tb/10000]
+        colors = ["#87CEEB", "#FFD700", "#FFD700"]
+        fig_bar.add_trace(go.Bar(
+            x=cats, y=vals, marker_color=colors, text=[f"{v:.1f}만" for v in vals],
+            textposition="outside",
+        ))
+        fig_bar.add_hline(
+            y=PENSION_INCOME_LIMIT/10000,
+            line_dash="dash", line_color="#FF4B4B", line_width=2,
+            annotation_text="한도 1,500만원",
+            annotation_font_color="#FF4B4B",
+        )
+        fig_bar.update_layout(
+            height=230, paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(255,255,255,0.02)", font_color="white",
+            margin=dict(t=30,b=10,l=10,r=10),
+            yaxis=dict(title="만원", tickformat=","),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    # ── 경고 및 절세 조언 ───────────────────────────────
+    if pension_in_limit > PENSION_INCOME_LIMIT:
+        over = pension_in_limit - PENSION_INCOME_LIMIT
+        st.error(
+            f"🚨 한도 초과 예측: 개인납입·연금저축 연간 과세표준이 "
+            f"**{pension_in_limit/10000:.1f}만원**으로 1,500만원을 "
+            f"**{over/10000:.1f}만원** 초과합니다. "
+            f"과세비율 낮은 종목으로 교체하거나 수량을 줄이세요."
+        )
+        # 어떤 종목을 줄여야 하는가
+        if _updated_rows:
+            candidates = [d for d in _updated_rows if d["acc"] in ("IRP","연금저축")
+                          and d["tb"] > 0 and d.get("in_limit","") and "포함" in d.get("in_limit","")]
+            if candidates:
+                reduce_per = over / len(candidates) / 12
+                c_names = ", ".join(d["nm"][:10] for d in candidates[:3])
+                st.warning(
+                    f"💡 한도 포함 종목 균등 감축 시: {c_names} 등 각 "
+                    f"약 {reduce_per:.0f}원/월({reduce_per/candidates[0]['tb']:.0f}주) 수량 축소 필요"
+                )
+    elif pension_in_limit > PENSION_INCOME_LIMIT * WARN_RATIO:
         st.warning(
-            f"⚠️ 연간 한도의 **{irp_ps_annual_est/PENSION_INCOME_LIMIT*100:.1f}%** 수준입니다. "
-            f"월 인출 한도: 잔여 **{max(0,PENSION_INCOME_LIMIT-irp_ps_annual_est)/10000:.1f}만원** "
-            f"÷ {remaining_months}개월 = "
-            f"**{max(0,PENSION_INCOME_LIMIT-irp_ps_annual_est)/max(remaining_months,1)/10000:.1f}만원/월**"
+            f"⚠️ 한도의 {pension_in_limit/PENSION_INCOME_LIMIT*100:.1f}% 수준 — "
+            f"잔여 **{(PENSION_INCOME_LIMIT-pension_in_limit)/10000:.1f}만원** "
+            f"({remaining_months}개월 기준 월 "
+            f"{(PENSION_INCOME_LIMIT-pension_in_limit)/remaining_months/10000:.1f}만원 여유)"
+        )
+    else:
+        st.success(
+            f"✅ 연금소득 한도 정상 — "
+            f"잔여 {(PENSION_INCOME_LIMIT-pension_in_limit)/10000:.0f}만원 "
+            f"(월 {(PENSION_INCOME_LIMIT-pension_in_limit)/remaining_months/10000:.1f}만원 여유)"
+        )
+
+    # IRP 퇴직금 세금 별도 표시
+    if irp_retire_annual > 0:
+        irp_total_asset = sc_sub[sc_sub["계좌"]=="IRP"]["원금"].sum() if "원금" in sc_sub.columns else 0
+        if irp_total_asset == 0 and "평가액" in sc_sub.columns:
+            irp_total_asset = sc_sub[sc_sub["계좌"]=="IRP"]["평가액"].sum()
+        limit_m = (irp_total_asset / 10 * 1.2 / 12) if irp_total_asset > 0 else 1_500_000
+        within_m = min(irp_retire_monthly, limit_m)
+        excess_m = max(0, irp_retire_monthly - limit_m)
+        retire_tax_m = within_m * 0.0076 + excess_m * 0.011
+        st.info(
+            f"📌 IRP 퇴직금 원천 월 과세표준 {irp_retire_monthly:,.0f}원 → "
+            f"퇴직소득세 {retire_tax_m:,.0f}원/월 (한도내 0.76% + 초과 1.1%) — "
+            f"연금소득 1,500만원 한도와 **무관**하게 분리과세"
         )
 
 
@@ -696,337 +1012,6 @@ def _render_tax_strategy(tax_result: dict, sim: dict, target_monthly: float):
             f"{title}</div>"
             f"<div style='font-size:0.85rem; color:rgba(255,255,255,0.8); line-height:1.6;'>"
             f"{content}</div></div>",
-            unsafe_allow_html=True,
-        )
-
-
-# ════════════════════════════════════════════════════════
-# 시나리오 기반 과세표준 예측
-# ════════════════════════════════════════════════════════
-def _render_scenario_tax_prediction(
-    sc_tax_data: dict,
-    sc_df: pd.DataFrame,
-    sc_names: list,
-    current_month: int,
-    tax_result: dict,
-    sim: dict,
-) -> None:
-    """
-    시나리오 시트의 과세표준(K열) × 수량 기반으로
-    연간 과세표준을 예측하고 매입·매도 전략을 제시한다.
-    """
-    st.markdown("#### 🔮 시나리오별 연간 과세표준 예측")
-    st.caption(
-        "시나리오 시트의 **과세표준** 컬럼(주당 과세표준) × 수량 = 월 과세표준 → 연간 합계로 "
-        "IRP·연금저축 1,500만원 / ISA 비과세 한도를 미리 관리합니다."
-    )
-
-    if sc_df.empty or "과세표준" not in sc_df.columns:
-        st.info(
-            "시나리오 시트에 **과세표준** 컬럼(K열)이 없거나 데이터가 없습니다.\n\n"
-            "시나리오 탭에 `과세표준` 컬럼을 추가하고 주당 과세표준을 입력하면 "
-            "이 섹션에서 자동으로 연간 과세표준을 예측합니다."
-        )
-        return
-
-    # ── 시나리오 선택 ────────────────────────────────────
-    _sc_opts = sc_names if sc_names else ["현재안"]
-    _sel_sc  = st.selectbox(
-        "예측 시나리오", _sc_opts,
-        key="tax_pred_sc_sel",
-        help="과세표준을 예측할 시나리오를 선택하세요",
-    )
-
-    # 선택 시나리오 데이터 필터
-    sc_sub = sc_df[sc_df["시나리오명"] == _sel_sc].copy()
-    if sc_sub.empty:
-        st.warning(f"시나리오 '{_sel_sc}' 데이터가 없습니다.")
-        return
-
-    for _nc in ["수량","주당분배금","과세표준","평가액","원금"]:
-        if _nc in sc_sub.columns:
-            sc_sub[_nc] = pd.to_numeric(sc_sub[_nc].astype(str).str.replace(",",""), errors="coerce").fillna(0)
-
-    # 원금 없으면 평가액 사용
-    if "원금" not in sc_sub.columns or sc_sub["원금"].sum() == 0:
-        if "평가액" in sc_sub.columns:
-            sc_sub["원금"] = sc_sub["평가액"]
-
-    # 분배주기 반영 (년 = 1회, 월 = 12회)
-    if "분배주기" in sc_sub.columns:
-        sc_sub["_freq"] = sc_sub["분배주기"].astype(str).apply(
-            lambda x: 1 if "년" in x else 12
-        )
-    else:
-        sc_sub["_freq"] = 12
-
-    sc_sub["_월분배금"]   = sc_sub["주당분배금"] * sc_sub["수량"]
-    sc_sub["_월과세표준"] = sc_sub["과세표준"]   * sc_sub["수량"]
-    sc_sub["_연분배금"]   = sc_sub["_월분배금"]  * sc_sub["_freq"] / 12 * 12
-    sc_sub["_연과세표준"] = sc_sub["_월과세표준"]* sc_sub["_freq"] / 12 * 12
-    sc_sub["_과세비율"]   = (sc_sub["과세표준"] / sc_sub["주당분배금"].replace(0, float("nan")) * 100).fillna(0).round(1)
-
-    # 계좌별 집계
-    def _acc_sum(acc_list):
-        rows = sc_sub[sc_sub["계좌"].isin(acc_list)] if "계좌" in sc_sub.columns else sc_sub
-        return rows["_연과세표준"].sum(), rows["_연분배금"].sum()
-
-    irp_tb, irp_dist = _acc_sum(["IRP"])
-    ps_tb,  ps_dist  = _acc_sum(["연금저축"])
-    isa_tb, isa_dist = _acc_sum(["ISA"])
-    gen_tb, gen_dist = _acc_sum(["일반"])
-    pension_tb = irp_tb + ps_tb
-
-    remaining_months = max(1, 12 - current_month + 1)
-
-    # ── 예측 요약 카드 ───────────────────────────────────
-    p1, p2, p3, p4 = st.columns(4)
-
-    _pc = "#FF4B4B" if pension_tb > PENSION_INCOME_LIMIT else ("#FFD700" if pension_tb > PENSION_INCOME_LIMIT * 0.8 else "#7dffb0")
-    p1.metric(
-        "IRP·연금저축 연간 과세표준 (예측)",
-        f"{pension_tb/10000:.1f}만원",
-        delta=f"한도 대비 {pension_tb/PENSION_INCOME_LIMIT*100:.1f}%",
-        delta_color="inverse" if pension_tb > PENSION_INCOME_LIMIT * 0.8 else "normal",
-        help="시나리오 주당과세표준 × 수량 × 12개월",
-    )
-    p2.metric(
-        "한도 잔여",
-        f"{max(0, PENSION_INCOME_LIMIT - pension_tb)/10000:.1f}만원",
-        delta=f"월 {max(0, PENSION_INCOME_LIMIT - pension_tb)/remaining_months/10000:.1f}만원 여유",
-        help=f"남은 {remaining_months}개월 균등 배분 기준",
-    )
-    p3.metric(
-        "ISA 연간 분배금 (예측)",
-        f"{isa_dist/10000:.1f}만원",
-        delta=f"비과세 {min(isa_dist, ISA_TAX_FREE_ANNUAL)/10000:.1f}만원",
-        help="ISA는 연 200만원까지 비과세",
-    )
-    p4.metric(
-        "현재 실적 대비",
-        f"{pension_tb/10000:.1f}만원 (예측)",
-        delta=f"{(pension_tb - tax_result.get('irp_ps_annual', 0))/10000:+.1f}만원 차이",
-        help="현재 누적 실적과의 차이",
-    )
-
-    st.divider()
-
-    # ── 종목별 과세표준 상세 테이블 ─────────────────────
-    st.markdown("**📋 종목별 과세표준 예측 상세**")
-
-    disp_cols = ["계좌","종목명","수량","주당분배금","과세표준","_과세비율","_월과세표준","_연과세표준"]
-    disp_cols = [c for c in disp_cols if c in sc_sub.columns]
-
-    _disp = sc_sub[disp_cols].copy().rename(columns={
-        "_과세비율": "과세비율(%)",
-        "_월과세표준": "월과세표준",
-        "_연과세표준": "연과세표준",
-    })
-    _disp = _disp[_disp["수량"] > 0].sort_values(["계좌","연과세표준"], ascending=[True, False])
-
-    # 색상 강조 (HTML 테이블)
-    _acc_bc = {"IRP":"rgba(135,206,235,0.15)","연금저축":"rgba(255,215,0,0.1)",
-               "ISA":"rgba(125,255,176,0.1)","일반":"rgba(175,169,236,0.1)"}
-    th = ("background:rgba(255,255,255,0.06);padding:7px 10px;font-size:0.78rem;"
-          "font-weight:600;color:rgba(255,255,255,0.55);border-bottom:1px solid rgba(255,255,255,0.1);"
-          "white-space:nowrap;text-align:right;")
-    th_l = th.replace("text-align:right","text-align:left")
-
-    rows_html = []
-    prev_acc_t = None
-    for _, row in _disp.iterrows():
-        acc_t = str(row.get("계좌",""))
-        if acc_t != prev_acc_t:
-            prev_acc_t = acc_t
-        bg = _acc_bc.get(acc_t, "")
-        pct = float(row.get("과세비율(%)", 0))
-        pct_c = "#FF4B4B" if pct >= 90 else ("#FFD700" if pct >= 50 else "#7dffb0")
-        annual = float(row.get("연과세표준", 0))
-        rows_html.append(
-            f"<tr style='border-bottom:0.5px solid rgba(255,255,255,0.06);background:{bg};'>"
-            f"<td style='padding:5px 10px;font-size:0.82rem;'>{acc_t}</td>"
-            f"<td style='padding:5px 10px;font-size:0.82rem;'>{str(row.get('종목명',''))[:28]}</td>"
-            f"<td style='padding:5px 10px;text-align:right;font-size:0.82rem;'>{int(row.get('수량',0)):,}</td>"
-            f"<td style='padding:5px 10px;text-align:right;font-size:0.82rem;'>{int(row.get('주당분배금',0)):,}</td>"
-            f"<td style='padding:5px 10px;text-align:right;font-size:0.82rem;'>{int(row.get('과세표준',0)):,}</td>"
-            f"<td style='padding:5px 10px;text-align:right;font-size:0.82rem;color:{pct_c};font-weight:600;'>{pct:.1f}%</td>"
-            f"<td style='padding:5px 10px;text-align:right;font-size:0.82rem;'>{int(row.get('월과세표준',0)):,}</td>"
-            f"<td style='padding:5px 10px;text-align:right;font-size:0.82rem;font-weight:600;'>{annual/10000:.2f}만</td>"
-            f"</tr>"
-        )
-
-    # 계좌별 소계행
-    for _acc_g in ["IRP","연금저축","ISA","일반"]:
-        _adf = _disp[_disp["계좌"] == _acc_g]
-        if _adf.empty: continue
-        _atb = _adf["연과세표준"].sum()
-        _bg  = _acc_bc.get(_acc_g,"")
-        rows_html.append(
-            f"<tr style='border-top:1px solid rgba(255,255,255,0.15);font-weight:600;background:{_bg};'>"
-            f"<td style='padding:5px 10px;font-size:0.8rem;color:rgba(255,255,255,0.5);' colspan='7'>{_acc_g} 소계</td>"
-            f"<td style='padding:5px 10px;text-align:right;font-size:0.82rem;color:#FFD700;'>{_atb/10000:.2f}만</td>"
-            f"</tr>"
-        )
-
-    tbl = (
-        "<div style='overflow-x:auto;border:1px solid rgba(255,255,255,0.1);border-radius:8px;'>"
-        "<table style='width:100%;border-collapse:collapse;'><thead><tr>"
-        f"<th style='{th_l}'>계좌</th><th style='{th_l}'>종목명</th>"
-        f"<th style='{th}'>수량</th><th style='{th}'>주당분배금</th>"
-        f"<th style='{th}'>주당과세표준</th><th style='{th}'>과세비율</th>"
-        f"<th style='{th}'>월과세표준</th><th style='{th}'>연과세표준</th>"
-        f"</tr></thead><tbody>{''.join(rows_html)}</tbody></table></div>"
-    )
-    st.markdown(tbl, unsafe_allow_html=True)
-
-    st.divider()
-
-    # ── 한도 사용 시각화 ────────────────────────────────
-    import plotly.graph_objects as _go
-    col_a, col_b = st.columns(2)
-
-    with col_a:
-        st.markdown("**IRP·연금저축 과세표준 한도 예측**")
-        _actual = tax_result.get("irp_ps_annual", 0)
-        fig_bar = _go.Figure()
-        fig_bar.add_trace(_go.Bar(
-            x=["현재 실적","시나리오 예측"],
-            y=[_actual/10000, pension_tb/10000],
-            marker_color=["#87CEEB", _pc],
-            text=[f"{_actual/10000:.1f}만", f"{pension_tb/10000:.1f}만"],
-            textposition="outside",
-        ))
-        fig_bar.add_hline(
-            y=PENSION_INCOME_LIMIT/10000,
-            line_dash="dash", line_color="#FF4B4B", line_width=2,
-            annotation_text="한도 1,500만원",
-            annotation_font_color="#FF4B4B",
-        )
-        fig_bar.add_hline(
-            y=PENSION_INCOME_LIMIT*0.8/10000,
-            line_dash="dot", line_color="#FFD700", line_width=1,
-            annotation_text="경고 1,200만원 (80%)",
-            annotation_font_color="#FFD700",
-        )
-        fig_bar.update_layout(
-            height=280, paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(255,255,255,0.02)", font_color="white",
-            margin=dict(t=30,b=10,l=10,r=10),
-            yaxis=dict(title="만원", tickformat=","),
-            showlegend=False,
-        )
-        st.plotly_chart(fig_bar, use_container_width=True)
-
-    with col_b:
-        st.markdown("**종목별 과세비율 분포 (버블: 연과세표준 크기)**")
-        _plot_df = _disp[_disp["수량"] > 0].copy()
-        _colors  = {"IRP":"#87CEEB","연금저축":"#FFD700","ISA":"#7dffb0","일반":"#AFA9EC"}
-        fig_bub  = _go.Figure()
-        for _ac in _plot_df["계좌"].unique():
-            _adf2 = _plot_df[_plot_df["계좌"] == _ac]
-            fig_bub.add_trace(_go.Scatter(
-                x=_adf2["주당분배금"],
-                y=_adf2["과세비율(%)"],
-                mode="markers+text",
-                name=_ac,
-                marker=dict(
-                    size=(_adf2["연과세표준"] / max(_plot_df["연과세표준"].max(), 1) * 40 + 10).clip(10, 50),
-                    color=_colors.get(_ac, "#AFA9EC"),
-                    opacity=0.8,
-                ),
-                text=_adf2["종목명"].str[:8],
-                textposition="top center",
-                textfont=dict(size=9),
-                hovertemplate=(
-                    "%{text}<br>주당분배금:%{x}원<br>"
-                    "과세비율:%{y:.1f}%<extra></extra>"
-                ),
-            ))
-        fig_bub.add_hline(y=80, line_dash="dot", line_color="rgba(255,75,75,0.4)", line_width=1,
-                           annotation_text="80% 경계", annotation_font_color="rgba(255,75,75,0.6)")
-        fig_bub.update_layout(
-            height=280, paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(255,255,255,0.02)", font_color="white",
-            margin=dict(t=30,b=10,l=10,r=10),
-            xaxis=dict(title="주당분배금(원)"),
-            yaxis=dict(title="과세비율(%)", range=[0,110]),
-            legend=dict(orientation="h", y=-0.15),
-        )
-        st.plotly_chart(fig_bub, use_container_width=True)
-
-    st.divider()
-
-    # ── 매입·매도 전략 제안 ───────────────────────────────
-    st.markdown("**⚖️ 매입·매도 전략 제안 (과세표준 기반)**")
-
-    _items = _disp[_disp["수량"] > 0].copy()
-    _buy_candidates   = _items[_items["과세비율(%)"] < 30].sort_values("과세비율(%)")
-    _reduce_candidates= _items[_items["과세비율(%)"] >= 80].sort_values("과세비율(%)", ascending=False)
-    _isa_move_cands   = _items[(_items["계좌"] == "IRP") & (_items["과세비율(%)"] < 50)]
-    _pension_margin   = PENSION_INCOME_LIMIT - pension_tb
-
-    strategy_items = []
-
-    # 한도 초과 경고
-    if pension_tb > PENSION_INCOME_LIMIT:
-        over = pension_tb - PENSION_INCOME_LIMIT
-        strategy_items.append(("🚨 연금소득 한도 초과 예측", "#FF4B4B",
-            f"시나리오 기준 IRP·연금저축 연간 과세표준이 {pension_tb/10000:.1f}만원으로 "
-            f"한도를 {over/10000:.1f}만원 초과합니다. "
-            "과세비율 높은 종목 축소 또는 ISA 전환이 필요합니다."))
-    elif pension_tb > PENSION_INCOME_LIMIT * 0.9:
-        strategy_items.append(("⚠️ 한도 90% 근접", "#FF8C00",
-            f"연간 과세표준 예측 {pension_tb/10000:.1f}만원으로 한도의 "
-            f"{pension_tb/PENSION_INCOME_LIMIT*100:.1f}%에 해당합니다. "
-            "추가 매입 시 한도 초과 위험이 있습니다."))
-    else:
-        strategy_items.append(("✅ 한도 여유 있음", "#7dffb0",
-            f"연간 과세표준 예측 {pension_tb/10000:.1f}만원 — "
-            f"한도 잔여 {_pension_margin/10000:.1f}만원 "
-            f"(월 {_pension_margin/remaining_months/10000:.1f}만원 여유)"))
-
-    # 매입 우선 종목 (과세비율 낮음)
-    if not _buy_candidates.empty:
-        _bc_list = ", ".join(_buy_candidates["종목명"].str[:10].tolist()[:3])
-        _bc_avg  = _buy_candidates["과세비율(%)"].mean()
-        _bc_cnt  = len(_buy_candidates)
-        strategy_items.append(("📈 매입 우선 종목 (과세비율 낮음)", "#7dffb0",
-            f"과세비율 30% 미만 종목은 같은 분배금으로 과세표준이 낮아 절세 효과가 큽니다. "
-            f"우선 매입 후보: {_bc_list} 등 "
-            f"({_bc_cnt}개 종목, 평균 과세비율 {_bc_avg:.1f}%)"))
-
-    # 축소 검토 종목 (과세비율 높음)
-    if not _reduce_candidates.empty:
-        _rc_list = ", ".join(_reduce_candidates["종목명"].str[:10].tolist()[:3])
-        _rc_cnt  = len(_reduce_candidates)
-        strategy_items.append(("📉 축소 검토 종목 (과세비율 높음)", "#FFD700",
-            "과세비율 80% 이상 종목은 분배금 대부분이 과세표준에 반영됩니다. "
-            "한도 여유가 부족하면 축소 또는 ISA 전환을 검토하세요. "
-            f"검토 후보: {_rc_list} 등 ({_rc_cnt}개 종목)"))
-
-    # ISA 전환 제안
-    if not _isa_move_cands.empty:
-        _im_list = ", ".join(_isa_move_cands["종목명"].str[:10].tolist()[:2])
-        strategy_items.append(("💡 ISA 전환 검토 (IRP 내 저과세 종목)", "#87CEEB",
-            "IRP 내 과세비율 50% 미만 종목은 ISA로 전환 시 비과세 혜택(연 200만원)을 받을 수 있습니다. "
-            "단, ISA는 5년 의무 보유 조건을 확인하세요. "
-            f"전환 검토 후보: {_im_list} 등"))
-
-    # ISA 한도 관리
-    isa_over = isa_dist - ISA_TAX_FREE_ANNUAL
-    if isa_over > 0:
-        strategy_items.append(("⚠️ ISA 비과세 한도 초과 예측", "#FFD700",
-            f"ISA 연간 분배금이 {isa_dist/10000:.1f}만원으로 비과세 한도(200만원)를 "
-            f"{isa_over/10000:.1f}만원 초과 예측됩니다. "
-            "초과분은 9.9% 분리과세됩니다."))
-    for _title, _color, _body in strategy_items:
-        st.markdown(
-            f"<div style='background:rgba(255,255,255,0.03);border-left:4px solid {_color};"
-            f"border-radius:0 8px 8px 0;padding:10px 14px;margin-bottom:8px;'>"
-            f"<div style='font-size:0.82rem;font-weight:700;color:{_color};margin-bottom:4px;'>"
-            f"{_title}</div>"
-            f"<div style='font-size:0.85rem;color:rgba(255,255,255,0.8);line-height:1.7;'>"
-            f"{_body}</div></div>",
             unsafe_allow_html=True,
         )
 

@@ -598,29 +598,34 @@ def _render_estimation_mode(
     sc_df    = sc_data.get("sc_df",    pd.DataFrame())
     sc_names = sc_data.get("sc_names", [])
 
-    # sc_df 유효성 검사
+    # sc_df 유효성 검사 — 시나리오명·계좌 컬럼 모두 필요
     _sc_valid = (
         isinstance(sc_df, pd.DataFrame)
         and not sc_df.empty
         and "시나리오명" in sc_df.columns
+        and "계좌" in sc_df.columns
     )
 
     if _sc_valid:
         _opts = sc_names if sc_names else sc_df["시나리오명"].dropna().unique().tolist()
-        # ★ 메인 화면 선택값이 있으면 해당 시나리오를 기본값으로 설정
-        _default_idx = 0
-        if sc_choice and sc_choice in _opts:
-            _default_idx = _opts.index(sc_choice)
-        _sel  = st.selectbox(
-            "시뮬레이션 시나리오", _opts,
-            index=_default_idx,
-            key="est_sc_sel",
-            help="시나리오 탭의 포트폴리오로 연간 과세표준을 추산합니다 (메인 화면 선택과 연동)",
-        )
-        # 시나리오 모드 활성 중이면 배지 표시
-        if sc_applied and sc_choice and sc_choice == _sel:
-            st.caption(f"🎯 메인 화면 시나리오와 연동 중: **{_sel}**")
-        sc_sub = sc_df[sc_df["시나리오명"] == _sel].copy()
+        if not _opts:           # 옵션이 아예 없으면 폴백
+            sc_sub = pd.DataFrame()
+            _sel   = ""
+        else:
+            # ★ 메인 화면 선택값이 있으면 해당 시나리오를 기본값으로 설정
+            _default_idx = 0
+            if sc_choice and sc_choice in _opts:
+                _default_idx = _opts.index(sc_choice)
+            _sel  = st.selectbox(
+                "시뮬레이션 시나리오", _opts,
+                index=_default_idx,
+                key="est_sc_sel",
+                help="시나리오 탭의 포트폴리오로 연간 과세표준을 추산합니다 (메인 화면 선택과 연동)",
+            )
+            # 시나리오 모드 활성 중이면 배지 표시
+            if sc_applied and sc_choice and sc_choice == _sel:
+                st.caption(f"🎯 메인 화면 시나리오와 연동 중: **{_sel}**")
+            sc_sub = sc_df[sc_df["시나리오명"] == _sel].copy()
     elif isinstance(sc_df, pd.DataFrame) and not sc_df.empty:
         sc_sub = sc_df.copy()
         _sel   = "기본 포트폴리오"
@@ -671,9 +676,21 @@ def _render_estimation_mode(
         elif "현재가" in sc_sub.columns:
             sc_sub["원금"] = sc_sub["_qty"] * sc_sub["현재가"]
 
-    # 과세표준 컬럼 없으면 0
-    if "과세표준" not in sc_sub.columns:
-        sc_sub["과세표준"] = 0
+    # 과세표준 컬럼 없거나 전부 0이면 주당분배금×과세비율(%) 또는 분배율(%)로 역산 시도
+    if "과세표준" not in sc_sub.columns or sc_sub["과세표준"].sum() == 0:
+        if "주당분배금" in sc_sub.columns and "과세비율(%)" in sc_sub.columns:
+            sc_sub["과세표준"] = (
+                pd.to_numeric(sc_sub["주당분배금"].astype(str).str.replace(",",""), errors="coerce").fillna(0)
+                * pd.to_numeric(sc_sub["과세비율(%)"].astype(str).str.replace(",",""), errors="coerce").fillna(0)
+                / 100
+            ).round(0).astype(int)
+        elif "주당분배금" in sc_sub.columns:
+            # 과세비율 정보 없으면 주당분배금 전액을 과세표준으로 간주 (보수적 추산)
+            sc_sub["과세표준"] = pd.to_numeric(
+                sc_sub["주당분배금"].astype(str).str.replace(",",""), errors="coerce"
+            ).fillna(0).round(0).astype(int)
+        else:
+            sc_sub["과세표준"] = 0
 
     # 분배주기 반영
     if "분배주기" in sc_sub.columns:

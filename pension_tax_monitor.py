@@ -81,9 +81,74 @@ def _gauge_fig(value: float, limit: float, title: str, unit: str = "만원") -> 
 # ════════════════════════════════════════════════════════
 # 과세 계산 엔진
 # ════════════════════════════════════════════════════════
+def _apply_qty_to_dist(yr_df: pd.DataFrame, sc_df: pd.DataFrame, sc_name: str = "") -> pd.DataFrame:
+    """
+    분배금과세 시트가 주당 단위로 입력된 경우, 시나리오 sc_df의 수량을 종목명 기준으로 매칭하여
+    분배금(원)·과세표준(원)을 실제 금액(주당×수량)으로 환산한다.
+
+    주당 단위 판별 기준: 분배금(원) 최댓값 < 100,000 (1주당 분배금이 10만원 넘는 경우는 거의 없음)
+    """
+    if sc_df is None or sc_df.empty or yr_df.empty:
+        return yr_df
+    if "분배금(원)" not in yr_df.columns:
+        return yr_df
+
+    max_val = yr_df["분배금(원)"].max()
+    if max_val >= 100_000:
+        # 이미 실제 금액 단위 → 변환 불필요
+        return yr_df
+
+    # 시나리오 필터링
+    sc = sc_df.copy()
+    if sc_name and "시나리오명" in sc.columns:
+        sc = sc[sc["시나리오명"] == sc_name]
+    elif "시나리오명" in sc.columns:
+        sc = sc[sc["시나리오명"] == sc["시나리오명"].iloc[0]]
+
+    if sc.empty:
+        return yr_df
+
+    # 수량 컬럼 결정: 시나리오수량 > 수량
+    if "시나리오수량" in sc.columns:
+        sc["_qty"] = pd.to_numeric(sc["시나리오수량"].astype(str).str.replace(",",""), errors="coerce").fillna(0)
+        if sc["_qty"].sum() == 0 and "수량" in sc.columns:
+            sc["_qty"] = pd.to_numeric(sc["수량"].astype(str).str.replace(",",""), errors="coerce").fillna(0)
+    elif "수량" in sc.columns:
+        sc["_qty"] = pd.to_numeric(sc["수량"].astype(str).str.replace(",",""), errors="coerce").fillna(0)
+    else:
+        return yr_df
+
+    # 종목명 기준 수량 매핑 (같은 종목이 여러 계좌에 있으면 계좌까지 매칭)
+    qty_map = {}
+    for _, row in sc.iterrows():
+        nm  = str(row.get("종목명","")).strip()
+        acc = str(row.get("계좌","")).strip()
+        qty_map[(nm, acc)] = qty_map.get((nm, acc), 0) + float(row["_qty"])
+
+    def _get_qty(row):
+        nm  = str(row.get("종목명","")).strip()
+        acc = str(row.get("계좌","")).strip()
+        key = (nm, acc)
+        if key in qty_map:
+            return qty_map[key]
+        # 계좌 무시하고 종목명만으로 폴백
+        for (n, a), q in qty_map.items():
+            if n == nm:
+                return q
+        return 1  # 수량 미특정 시 1 유지 (원본값 보존)
+
+    result = yr_df.copy()
+    qtys = result.apply(_get_qty, axis=1)
+    result["분배금(원)"]   = (result["분배금(원)"]   * qtys).round(0)
+    result["과세표준(원)"] = (result["과세표준(원)"] * qtys).round(0)
+    return result
+
+
 def calc_taxable_income(
     dist_df: pd.DataFrame,   # 월별 분배금 시트 (구조 아래 참고)
     year: int,
+    sc_df: pd.DataFrame = None,   # ★ 시나리오 df (수량 환산용, 없으면 주당 단위 그대로)
+    sc_name: str = "",            # ★ 적용할 시나리오명
 ) -> dict:
     """
     dist_df 컬럼:
@@ -93,6 +158,8 @@ def calc_taxable_income(
         IRP·연금저축 → 연금소득 (분리과세 1,500만원 한도)
         ISA          → 200만원 비과세, 초과분 9.9% 분리과세
         일반         → 금융소득 종합과세 대상 (2,000만원 초과 시 종합)
+
+    ★ sc_df 전달 시: 분배금과세 시트가 주당 단위인 경우 수량을 곱하여 실제 금액으로 환산
     """
     # ── 필수 컬럼 검증 ───────────────────────────────────
     required = ["연월", "분배금(원)"]
@@ -114,6 +181,83 @@ def calc_taxable_income(
     yr_df["과세표준(원)"] = pd.to_numeric(yr_df["과세표준(원)"], errors="coerce").fillna(0)
     yr_df["분배금(원)"]   = pd.to_numeric(yr_df["분배금(원)"],   errors="coerce").fillna(0)
     yr_df["비과세(원)"]   = pd.to_numeric(yr_df["비과세(원)"],   errors="coerce").fillna(0)
+
+    # ★ 주당 단위 → 실제 금액 환산 (sc_df 있을 때)
+    yr_df = _apply_qty_to_dist(yr_df, sc_df, sc_name)
+
+    # ★ sc_df 있을 때: 시트에 없는 계좌/종목은 시나리오 월 예측치로 보완하여 연간 추산
+    #   분배금과세 시트는 이미 지난 실적만 기록 → 나머지 월은 시나리오로 채움
+    if sc_df is not None and not sc_df.empty:
+        actual_months = yr_df["연월"].astype(str).unique()
+        actual_month_count = len(actual_months)
+        remaining_months   = max(0, 12 - actual_month_count)
+
+        if remaining_months > 0:
+            sc = sc_df.copy()
+            if sc_name and "시나리오명" in sc.columns:
+                sc = sc[sc["시나리오명"] == sc_name]
+            elif "시나리오명" in sc.columns and not sc.empty:
+                sc = sc[sc["시나리오명"] == sc["시나리오명"].iloc[0]]
+
+            for col in ["수량", "시나리오수량", "주당분배금", "과세표준"]:
+                if col in sc.columns:
+                    sc[col] = pd.to_numeric(sc[col].astype(str).str.replace(",",""), errors="coerce").fillna(0)
+
+            # 수량 결정
+            if "시나리오수량" in sc.columns and sc["시나리오수량"].sum() > 0:
+                sc["_qty"] = sc["시나리오수량"]
+            elif "수량" in sc.columns:
+                sc["_qty"] = sc["수량"]
+            else:
+                sc["_qty"] = 0
+
+            if "계좌" in sc.columns:
+                # 이미 시트에 실적 있는 종목은 시트값 우선 → 시나리오로 보완만
+                # 실적에 없는 계좌 종목을 잔여월만큼 추가
+                actual_items = set(
+                    zip(yr_df["계좌"].astype(str), yr_df.get("종목명", pd.Series(dtype=str)).astype(str))
+                ) if "종목명" in yr_df.columns else set()
+
+                for _, row in sc.iterrows():
+                    acc  = str(row.get("계좌","")).strip()
+                    nm   = str(row.get("종목명","")).strip()
+                    qty  = float(row["_qty"])
+                    tb   = float(row.get("과세표준", 0))
+                    dist = float(row.get("주당분배금", 0))
+                    freq = str(row.get("분배주기","월"))
+
+                    # 연간 분배면 남은 월 비례로 환산
+                    annual_factor = 1 if "년" in freq else remaining_months
+
+                    # 이미 시트에 실적 있는 종목은 잔여월만 보완
+                    # (실적이 1달 있으면 11달치 시나리오 추가)
+                    extra_tb   = qty * tb   * annual_factor
+                    extra_dist = qty * dist * annual_factor
+
+                    if acc in ("IRP","연금저축"):
+                        yr_df = pd.concat([yr_df, pd.DataFrame([{
+                            "연월": f"{year}-SC",
+                            "계좌": acc, "종목명": nm,
+                            "분배금(원)": extra_dist,
+                            "과세표준(원)": extra_tb,
+                            "비과세(원)": 0,
+                        }])], ignore_index=True)
+                    elif acc == "ISA":
+                        yr_df = pd.concat([yr_df, pd.DataFrame([{
+                            "연월": f"{year}-SC",
+                            "계좌": acc, "종목명": nm,
+                            "분배금(원)": extra_dist,
+                            "과세표준(원)": extra_tb,
+                            "비과세(원)": 0,
+                        }])], ignore_index=True)
+                    elif acc == "일반":
+                        yr_df = pd.concat([yr_df, pd.DataFrame([{
+                            "연월": f"{year}-SC",
+                            "계좌": acc, "종목명": nm,
+                            "분배금(원)": extra_dist,
+                            "과세표준(원)": extra_tb,
+                            "비과세(원)": 0,
+                        }])], ignore_index=True)
 
     # 계좌별 집계
     irp_ps   = yr_df[yr_df["계좌"].isin(["IRP","연금저축"])]["과세표준(원)"].sum()
@@ -159,7 +303,12 @@ def _empty_tax_result(year: int) -> dict:
     ]} | {"year": year}
 
 
-def calc_monthly_cumulative(dist_df: pd.DataFrame, year: int) -> pd.DataFrame:
+def calc_monthly_cumulative(
+    dist_df: pd.DataFrame,
+    year: int,
+    sc_df: pd.DataFrame = None,   # ★ 수량 환산용
+    sc_name: str = "",
+) -> pd.DataFrame:
     """월별 누적 과세표준 DataFrame 반환"""
     # 필수 컬럼 검증
     if "연월" not in dist_df.columns or "분배금(원)" not in dist_df.columns:
@@ -176,6 +325,9 @@ def calc_monthly_cumulative(dist_df: pd.DataFrame, year: int) -> pd.DataFrame:
 
     yr_df["과세표준(원)"] = pd.to_numeric(yr_df["과세표준(원)"], errors="coerce").fillna(0)
     yr_df["분배금(원)"]   = pd.to_numeric(yr_df["분배금(원)"],   errors="coerce").fillna(0)
+
+    # ★ 주당 단위 → 실제 금액 환산 (sc_df 있을 때)
+    yr_df = _apply_qty_to_dist(yr_df, sc_df, sc_name)
 
     monthly = yr_df.groupby(["연월","계좌"]).agg(
         과세표준=("과세표준(원)", "sum"),
@@ -314,13 +466,25 @@ def render_tax_monitor_tab(tax_ctx: dict) -> None:
     # ════════════════════════════════════════════════════
     # B. 시트 연동 모드
     # ════════════════════════════════════════════════════
-    tax_result = calc_taxable_income(dist_df, sel_year)
-    cum_df     = calc_monthly_cumulative(dist_df, sel_year)
+    # ★ 분배금과세 시트가 주당 단위로 입력된 경우 sc_df 수량으로 실제 금액 환산
+    # ★ 시트에 없는 잔여 월은 시나리오 수량×과세표준으로 연간 추산 보완
+    tax_result = calc_taxable_income(dist_df, sel_year, sc_df=sc_df_ctx, sc_name=sc_choice_ctx)
+    cum_df     = calc_monthly_cumulative(dist_df, sel_year, sc_df=sc_df_ctx, sc_name=sc_choice_ctx)
     sim        = simulate_remaining_capacity(
         tax_result["irp_ps_annual"],
         tax_result["gen_taxable_annual"],
         current_month,
     )
+
+    # ── 연간 추산 안내 배너 (sc_df 연동 중일 때) ──────────
+    if sc_df_ctx is not None and not sc_df_ctx.empty:
+        _actual_cnt = len(dist_df[dist_df["연월"].astype(str).str.startswith(str(sel_year))]["연월"].unique())
+        _sc_label   = sc_choice_ctx if sc_choice_ctx else "현재안"
+        st.info(
+            f"📊 **시나리오 [{_sc_label}] 연동 추산** — "
+            f"분배금과세 시트 실적 **{_actual_cnt}개월** + "
+            f"잔여 **{12 - _actual_cnt}개월** 시나리오 예측치 합산 기준입니다."
+        )
 
     # ── 상단 경보 배너 ────────────────────────────────────
     p_color, p_emoji, p_label = _status(tax_result["irp_ps_annual"], PENSION_INCOME_LIMIT)
@@ -483,6 +647,8 @@ def render_tax_monitor_tab(tax_ctx: dict) -> None:
             yr_df["과세표준(원)"] = yr_df["분배금(원)"] if "분배금(원)" in yr_df.columns else 0
         yr_df["분배금(원)"]   = pd.to_numeric(yr_df.get("분배금(원)", 0),   errors="coerce").fillna(0)
         yr_df["과세표준(원)"] = pd.to_numeric(yr_df["과세표준(원)"],         errors="coerce").fillna(0)
+        # ★ 주당 단위 → 실제 금액 환산
+        yr_df = _apply_qty_to_dist(yr_df, sc_df_ctx, sc_choice_ctx)
         yr_df["과세비율(%)"]  = (yr_df["과세표준(원)"] / yr_df["분배금(원)"].replace(0, pd.NA) * 100).fillna(0).round(1)
 
         if not yr_df.empty:

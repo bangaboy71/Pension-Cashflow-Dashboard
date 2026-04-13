@@ -3255,27 +3255,28 @@ else:
     else:
         _irp_personal_r = float(st.session_state.get("irp_personal_ratio", 0)) / 100
 
-# ── ② 분배금과세 시트 → 실제 과세표준 계산 (기본모드 전용) ──
+# ── ② 분배금과세 시트 → 실제 과세표준 계산 (시나리오 모드 포함 항상 로드) ──
 _now_ym = datetime.now().strftime("%Y-%m")
 _taxbase_result = {"has_data": False}
 
-if not _sc_applied:
-    # 분배금과세 시트 로드
-    @st.cache_data(ttl=DATA_TTL, show_spinner=False)
-    def _load_dist_tax_inner(url: str, gid: str) -> pd.DataFrame:
-        try:
-            from pension_tax_monitor import load_dist_tax_sheet
-            return load_dist_tax_sheet(url, gid)
-        except Exception:
-            return pd.DataFrame()
-
-    _dist_tax_gid = st.secrets.get("DIST_TAX_SHEET_GID", "")
+# 시나리오 모드와 무관하게 항상 분배금과세 시트 로드 시도
+# → 과세관리 탭에서 시나리오 연동이 끊기는 문제 방지
+@st.cache_data(ttl=DATA_TTL, show_spinner=False)
+def _load_dist_tax_inner(url: str, gid: str) -> pd.DataFrame:
     try:
-        dist_tax_df = _load_dist_tax_inner(SHEET_URL, _dist_tax_gid)
+        from pension_tax_monitor import load_dist_tax_sheet
+        return load_dist_tax_sheet(url, gid)
     except Exception:
-        dist_tax_df = pd.DataFrame()
+        return pd.DataFrame()
 
-    # 과세표준 계산
+_dist_tax_gid = st.secrets.get("DIST_TAX_SHEET_GID", "")
+try:
+    dist_tax_df = _load_dist_tax_inner(SHEET_URL, _dist_tax_gid) if _dist_tax_gid else pd.DataFrame()
+except Exception:
+    dist_tax_df = pd.DataFrame()
+
+# 과세표준 계산 (기본모드 전용 — 시나리오 모드에서는 tax_monitor 내부에서 sc_df로 계산)
+if not _sc_applied:
     try:
         _taxbase_result = calc_irp_taxbase_from_sheet(
             dist_tax_df=dist_tax_df,
@@ -3284,9 +3285,6 @@ if not _sc_applied:
         )
     except Exception:
         _taxbase_result = {"has_data": False}
-else:
-    # 시나리오 모드: 과세표준 시트 연동 안 함
-    dist_tax_df = pd.DataFrame()
 
 # ── ③ 세후 계산: irp_income은 항상 실제 분배금으로 전달 ──────
 # calc_after_tax의 irp_income 인자 = 실제 분배금 (변경 없음)
@@ -5231,7 +5229,10 @@ with _main_tab8:
         "gen_monthly":    _gen_monthly_income,
         "ps_monthly":     ps_income,
         "target_monthly": target_monthly,
-        "sc_df":    sc_df    if "sc_df"    in dir() else pd.DataFrame(),
-        "sc_names": sc_names if "sc_names" in dir() else [],
+        # ★ 시나리오 연동: 메인 화면 선택값을 과세관리 탭에 그대로 전달
+        "sc_df":      sc_df     if "sc_df"     in dir() else pd.DataFrame(),
+        "sc_names":   sc_names  if "sc_names"  in dir() else [],
+        "sc_choice":  sc_choice if "sc_choice" in dir() else "",
+        "sc_applied": _sc_applied,   # 시나리오 모드 여부
     }
     render_tax_monitor_tab(_tax_ctx)

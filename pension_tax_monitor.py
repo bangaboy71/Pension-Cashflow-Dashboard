@@ -253,6 +253,10 @@ def render_tax_monitor_tab(tax_ctx: dict) -> None:
         gen_monthly     : 일반 이번달 분배금 (float)
         ps_monthly      : 연금저축 이번달 분배금 (float)
         target_monthly  : 목표 생활비 (float)
+        sc_df           : 시나리오 DataFrame
+        sc_names        : 시나리오 이름 목록
+        sc_choice       : 메인 화면에서 현재 선택된 시나리오명 (★연동 핵심)
+        sc_applied      : 시나리오 모드 활성 여부 (bool)
     """
     dist_df        = tax_ctx.get("dist_df", pd.DataFrame())
     year           = tax_ctx.get("year", 2026)
@@ -262,10 +266,12 @@ def render_tax_monitor_tab(tax_ctx: dict) -> None:
     gen_monthly    = tax_ctx.get("gen_monthly", 0.0)
     ps_monthly     = tax_ctx.get("ps_monthly", 0.0)
     target_monthly = tax_ctx.get("target_monthly", 6_600_000)
-    # ★ 시나리오 데이터 — sc_df/sc_names 직접 수신 (sc_tax_data 경유도 지원)
+    # ★ 시나리오 데이터 — sc_df/sc_names/sc_choice 직접 수신 (sc_tax_data 경유도 지원)
     _sc_tax_data   = tax_ctx.get("sc_tax_data", {})
     sc_df_ctx      = tax_ctx.get("sc_df", _sc_tax_data.get("sc_df",  pd.DataFrame()))
     sc_names_ctx   = tax_ctx.get("sc_names", _sc_tax_data.get("sc_names", []))
+    sc_choice_ctx  = tax_ctx.get("sc_choice", "")   # 메인 화면 선택값
+    sc_applied_ctx = tax_ctx.get("sc_applied", False)
     sc_tax_data    = {"sc_df": sc_df_ctx, "sc_names": sc_names_ctx}
 
     st.markdown(
@@ -298,6 +304,8 @@ def render_tax_monitor_tab(tax_ctx: dict) -> None:
             irp_monthly, isa_monthly, gen_monthly, ps_monthly,
             current_month, target_monthly,
             sc_tax_data=sc_tax_data,
+            sc_choice=sc_choice_ctx,       # ★ 메인 화면 선택 시나리오 전달
+            sc_applied=sc_applied_ctx,     # ★ 시나리오 모드 여부 전달
         )
         st.divider()
         _render_sheet_guide()
@@ -564,6 +572,8 @@ def _render_estimation_mode(
     irp_monthly, isa_monthly, gen_monthly, ps_monthly,
     current_month, target_monthly,
     sc_tax_data: dict = None,
+    sc_choice: str = "",      # ★ 메인 화면에서 선택된 시나리오명
+    sc_applied: bool = False, # ★ 시나리오 모드 활성 여부
 ):
     """
     시나리오 종목별 수량×과세표준 기반 연간 과세소득 시뮬레이션.
@@ -597,11 +607,19 @@ def _render_estimation_mode(
 
     if _sc_valid:
         _opts = sc_names if sc_names else sc_df["시나리오명"].dropna().unique().tolist()
+        # ★ 메인 화면 선택값이 있으면 해당 시나리오를 기본값으로 설정
+        _default_idx = 0
+        if sc_choice and sc_choice in _opts:
+            _default_idx = _opts.index(sc_choice)
         _sel  = st.selectbox(
             "시뮬레이션 시나리오", _opts,
+            index=_default_idx,
             key="est_sc_sel",
-            help="시나리오 탭의 포트폴리오로 연간 과세표준을 추산합니다",
+            help="시나리오 탭의 포트폴리오로 연간 과세표준을 추산합니다 (메인 화면 선택과 연동)",
         )
+        # 시나리오 모드 활성 중이면 배지 표시
+        if sc_applied and sc_choice and sc_choice == _sel:
+            st.caption(f"🎯 메인 화면 시나리오와 연동 중: **{_sel}**")
         sc_sub = sc_df[sc_df["시나리오명"] == _sel].copy()
     elif isinstance(sc_df, pd.DataFrame) and not sc_df.empty:
         sc_sub = sc_df.copy()

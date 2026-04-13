@@ -98,12 +98,21 @@ def _apply_qty_to_dist(yr_df: pd.DataFrame, sc_df: pd.DataFrame, sc_name: str = 
         # 이미 실제 금액 단위 → 변환 불필요
         return yr_df
 
-    # 시나리오 필터링
+    # 시나리오 필터링 — sc_name이 시나리오 탭에 없는 값("기본 시트 현황" 등)이면 첫 시나리오 폴백
     sc = sc_df.copy()
-    if sc_name and "시나리오명" in sc.columns:
-        sc = sc[sc["시나리오명"] == sc_name]
-    elif "시나리오명" in sc.columns:
-        sc = sc[sc["시나리오명"] == sc["시나리오명"].iloc[0]]
+    if "시나리오명" in sc.columns:
+        available = sc["시나리오명"].dropna().unique().tolist()
+        if sc_name and sc_name in available:
+            sc = sc[sc["시나리오명"] == sc_name]
+        else:
+            # "기본 시트 현황" 등 탭에 없는 선택값 → 기본적용=Y 시나리오 우선, 없으면 첫 번째
+            if "기본적용" in sc.columns:
+                _default_rows = sc[sc["기본적용"] == True]["시나리오명"].unique()
+                _fallback = _default_rows[0] if len(_default_rows) > 0 else (available[0] if available else "")
+            else:
+                _fallback = available[0] if available else ""
+            if _fallback:
+                sc = sc[sc["시나리오명"] == _fallback]
 
     if sc.empty:
         return yr_df
@@ -194,10 +203,19 @@ def calc_taxable_income(
 
         if remaining_months > 0:
             sc = sc_df.copy()
-            if sc_name and "시나리오명" in sc.columns:
-                sc = sc[sc["시나리오명"] == sc_name]
-            elif "시나리오명" in sc.columns and not sc.empty:
-                sc = sc[sc["시나리오명"] == sc["시나리오명"].iloc[0]]
+            # sc_name이 시나리오 탭에 없는 값이면 기본적용=Y 또는 첫 번째 시나리오로 폴백
+            if "시나리오명" in sc.columns:
+                available = sc["시나리오명"].dropna().unique().tolist()
+                if sc_name and sc_name in available:
+                    sc = sc[sc["시나리오명"] == sc_name]
+                else:
+                    if "기본적용" in sc.columns:
+                        _def = sc[sc["기본적용"] == True]["시나리오명"].unique()
+                        _fallback = _def[0] if len(_def) > 0 else (available[0] if available else "")
+                    else:
+                        _fallback = available[0] if available else ""
+                    if _fallback:
+                        sc = sc[sc["시나리오명"] == _fallback]
 
             for col in ["수량", "시나리오수량", "주당분배금", "과세표준"]:
                 if col in sc.columns:
@@ -479,7 +497,15 @@ def render_tax_monitor_tab(tax_ctx: dict) -> None:
     # ── 연간 추산 안내 배너 (sc_df 연동 중일 때) ──────────
     if sc_df_ctx is not None and not sc_df_ctx.empty:
         _actual_cnt = len(dist_df[dist_df["연월"].astype(str).str.startswith(str(sel_year))]["연월"].unique())
-        _sc_label   = sc_choice_ctx if sc_choice_ctx else "현재안"
+        # 실제 적용된 시나리오명 계산 (sc_choice가 "기본 시트 현황" 등일 때 폴백값 표시)
+        _available = sc_df_ctx["시나리오명"].dropna().unique().tolist() if "시나리오명" in sc_df_ctx.columns else []
+        if sc_choice_ctx and sc_choice_ctx in _available:
+            _sc_label = sc_choice_ctx
+        elif "기본적용" in sc_df_ctx.columns:
+            _def = sc_df_ctx[sc_df_ctx["기본적용"] == True]["시나리오명"].unique()
+            _sc_label = _def[0] if len(_def) > 0 else (_available[0] if _available else "현재안")
+        else:
+            _sc_label = _available[0] if _available else "현재안"
         st.info(
             f"📊 **시나리오 [{_sc_label}] 연동 추산** — "
             f"분배금과세 시트 실적 **{_actual_cnt}개월** + "

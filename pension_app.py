@@ -2838,6 +2838,8 @@ with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as
         sc_df           = pd.DataFrame()
         sc_names        = []
         sc_default_name = ""
+    # ★ 원본 sc_df 보존 — 이후 루프 변수(sc_df)에 의해 덮어쓰이는 것을 방지
+    _sc_df_original = sc_df.copy() if not sc_df.empty else pd.DataFrame()
 
     # STEP 5 — 가계부 로드
     st.write("📒 가계부 데이터 로드 중...")
@@ -4609,9 +4611,9 @@ with _main_tab1:
     # ── 고갈 시점 요약 카드 ───────────────────────────────
     st.markdown("#### 📌 시나리오별 고갈 시점")
     hd_cols = st.columns(3)
-    for i, (sc_name, sc_df) in enumerate(sc_dfs.items()):
-        irp_yr, irp_age = find_exhaust(sc_df, "IRP잔액")
-        isa_yr, isa_age = find_exhaust(sc_df, "ISA잔액")
+    for i, (sc_name, _sc_sim_df) in enumerate(sc_dfs.items()):
+        irp_yr, irp_age = find_exhaust(_sc_sim_df, "IRP잔액")
+        isa_yr, isa_age = find_exhaust(_sc_sim_df, "ISA잔액")
         line_color = sc_colors[sc_name][0]
         with hd_cols[i]:
             with st.container(border=True):
@@ -4647,13 +4649,13 @@ with _main_tab1:
             fig_bal = go.Figure()
 
             # 시나리오별 잔액 라인
-            for sc_name, sc_df in sc_dfs.items():
+            for sc_name, _sc_sim_df in sc_dfs.items():
                 line_c, fill_c = sc_colors[sc_name]
-                exhaust_yr, exhaust_age = find_exhaust(sc_df, bal_col)
+                exhaust_yr, exhaust_age = find_exhaust(_sc_sim_df, bal_col)
 
                 fig_bal.add_trace(go.Scatter(
-                    x=sc_df["연도"],
-                    y=sc_df[bal_col] / 100_000_000,
+                    x=_sc_sim_df["연도"],
+                    y=_sc_sim_df[bal_col] / 100_000_000,
                     name=sc_name,
                     mode="lines",
                     line=dict(color=line_c, width=2.5),
@@ -4695,11 +4697,11 @@ with _main_tab1:
             # 월 수익 추이 (보조 차트)
             st.markdown(f"**📈 {asset} 월 수익 추이 (시나리오별)**")
             fig_inc = go.Figure()
-            for sc_name, sc_df in sc_dfs.items():
+            for sc_name, _sc_sim_df in sc_dfs.items():
                 line_c, _ = sc_colors[sc_name]
                 fig_inc.add_trace(go.Scatter(
-                    x=sc_df["연도"],
-                    y=sc_df[inc_col] / 10000,
+                    x=_sc_sim_df["연도"],
+                    y=_sc_sim_df[inc_col] / 10000,
                     name=sc_name,
                     mode="lines",
                     line=dict(color=line_c, width=2),
@@ -4723,14 +4725,14 @@ with _main_tab1:
     st.markdown("#### 🔗 IRP + ISA 통합 잔액 시나리오 비교")
 
     fig_total_bal = go.Figure()
-    for sc_name, sc_df in sc_dfs.items():
+    for sc_name, _sc_sim_df in sc_dfs.items():
         line_c, fill_c = sc_colors[sc_name]
-        total_bal = sc_df["IRP잔액"] + sc_df["ISA잔액"]
+        total_bal = _sc_sim_df["IRP잔액"] + _sc_sim_df["ISA잔액"]
         exhaust_mask = total_bal <= 0
-        exhaust_yr_total = sc_df[exhaust_mask]["연도"].min() if exhaust_mask.any() else None
+        exhaust_yr_total = _sc_sim_df[exhaust_mask]["연도"].min() if exhaust_mask.any() else None
 
         fig_total_bal.add_trace(go.Scatter(
-            x=sc_df["연도"],
+            x=_sc_sim_df["연도"],
             y=total_bal / 100_000_000,
             name=sc_name,
             mode="lines",
@@ -4769,10 +4771,10 @@ with _main_tab1:
 
     # 시나리오별 요약 인사이트
     ins1, ins2, ins3 = st.columns(3)
-    for ins_col, (sc_name, sc_df) in zip([ins1, ins2, ins3], sc_dfs.items()):
+    for ins_col, (sc_name, _sc_sim_df) in zip([ins1, ins2, ins3], sc_dfs.items()):
         line_c = sc_colors[sc_name][0]
-        total_bal_last = sc_df["IRP잔액"].iloc[-1] + sc_df["ISA잔액"].iloc[-1]
-        total_income_sum = (sc_df["IRP월수익"] + sc_df["ISA월수익"]).sum()
+        total_bal_last = _sc_sim_df["IRP잔액"].iloc[-1] + _sc_sim_df["ISA잔액"].iloc[-1]
+        total_income_sum = (_sc_sim_df["IRP월수익"] + _sc_sim_df["ISA월수익"]).sum()
         with ins_col:
             st.markdown(
                 f"<div style='background:rgba(255,255,255,0.03); padding:12px; "
@@ -5229,8 +5231,8 @@ with _main_tab8:
         "gen_monthly":    _gen_monthly_income,
         "ps_monthly":     ps_income,
         "target_monthly": target_monthly,
-        # ★ 시나리오 연동: 메인 화면 선택값을 과세관리 탭에 그대로 전달
-        "sc_df":      sc_df     if "sc_df"     in dir() else pd.DataFrame(),
+        # ★ 시나리오 연동: 원본 sc_df(_sc_df_original) 사용 — 루프 변수 오염 방지
+        "sc_df":      _sc_df_original if "_sc_df_original" in dir() else pd.DataFrame(),
         "sc_names":   sc_names  if "sc_names"  in dir() else [],
         "sc_choice":  sc_choice if "sc_choice" in dir() else "",
         "sc_applied": _sc_applied,   # 시나리오 모드 여부

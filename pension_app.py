@@ -61,6 +61,7 @@ IRP_PENSION_PERSONAL_TAX = {  # 나이 → 세율(지방세 포함)
 
 
 
+
 def _render_household_tab(
     hh_df,
     display_income: float,
@@ -630,61 +631,38 @@ actual_gid = "여기에_실적탭_gid"
 
 # ── 관심종목 실시간 주가 수집 ─────────────────────────
 def _normalize_code(code: str) -> str:
-    """
-    종목코드를 Yahoo Finance 형식으로 정규화.
-
-    규칙:
-    - 이미 .KS / .KQ / .US 등 점이 포함된 코드 → 대문자 그대로
-    - 숫자만 6자리 (KRX 코드) → 뒤에 .KS 추가
-    - 영문자 포함 (미국 주식 티커: PLTR, AAPL 등) → 그대로 (Yahoo US 직접 조회)
-    - 빈 값 / nan / 0 → ""
-    """
-    code = str(code).strip().upper()
-    if not code or code in ("NAN", "0", ""):
+    """종목코드를 Yahoo Finance 형식으로 정규화. 예: 498400 → 498400.KS"""
+    code = str(code).strip()
+    if not code or code in ("nan", "0"):
         return ""
-    # 이미 Yahoo 형식 (점 포함: 498400.KS, PLTR.US 등)
-    if "." in code:
-        return code
-    # 숫자만 → KRX 종목 → .KS 추가
-    if code.isdigit():
-        return code + ".KS"
-    # 영문자 포함 → 미국 주식 티커 (PLTR, AAPL, TSLA 등) → 그대로
-    return code
-
-
-@st.cache_data(ttl="30m", show_spinner=False)
-def _fetch_usd_krw() -> float:
-    """USD/KRW 환율 조회 (Yahoo Finance USDKRW=X). 실패 시 1,380 반환."""
-    try:
-        import requests as _req
-        res = _req.get(
-            "https://query1.finance.yahoo.com/v8/finance/chart/USDKRW=X",
-            headers={"User-Agent": "Mozilla/5.0"},
-            params={"interval": "1d", "range": "2d"},
-            timeout=6,
-        )
-        meta = res.json()["chart"]["result"][0]["meta"]
-        rate = float(meta.get("regularMarketPrice", 0))
-        return rate if rate > 100 else 1380.0
-    except Exception:
-        return 1380.0
+    # 이미 .KS/.KQ 형식이면 그대로, 숫자만 있으면 .KS 추가
+    if "." not in code:
+        code = code + ".KS"
+    return code.upper()
 
 
 def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
     """
     종목코드 → (현재가, 전일대비%, 전일대비금액) 반환.
+    KRX 직전 거래일 실제 종가(수정주가 아님) 기준.
 
-    - KRX 종목 (코드.KS / .KQ): 원화 그대로
-    - 미국 주식 (PLTR, AAPL 등): USD → KRW 환산 후 반환
-    - 직전 거래일 종가는 5d OHLC quote.close 배열 기준
+    핵심 원칙:
+    - meta 의 previousClose 계열 키는 수정주가(adjusted)일 수 있으므로 사용 안 함
+    - range="5d", interval="1d" OHLC의 quote.close 배열에서
+      타임스탬프가 오늘 이전인 마지막 값을 직전 거래일 종가로 사용
+      (quote.close = 수정 전 실제 시장 종가)
+    - 현재가는 meta.regularMarketPrice (장 중 실시간)
     """
     ycode = _normalize_code(code)
     if not ycode:
         return 0, 0.0, 0.0
     try:
         import requests as _req
+        import time as _time
 
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ycode}"
+
+        # 5일 OHLC — quote.close 는 수정 전 실제 종가
         res = _req.get(
             url,
             headers={"User-Agent": "Mozilla/5.0"},
@@ -695,45 +673,41 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
         result = data["chart"]["result"][0]
         meta   = result["meta"]
 
-        now_p_raw = float(meta.get("regularMarketPrice", 0))
-        if now_p_raw == 0:
+        # 현재가 (실시간)
+        now_p = int(meta.get("regularMarketPrice", 0))
+        if now_p == 0:
             return 0, 0.0, 0.0
 
-        # 통화 감지 → USD면 원화 환산
-        currency = str(meta.get("currency", "KRW")).upper()
-        fx = _fetch_usd_krw() if currency == "USD" else 1.0
-
-        now_p = int(round(now_p_raw * fx))
-
-        # 직전 거래일 종가
+        # 오늘 날짜 기준 타임스탬프 (KST 기준 당일 0시 UTC)
         import datetime as _dt
         now_kst = _dt.datetime.utcnow() + _dt.timedelta(hours=9)
         today_start_utc = int(
-            _dt.datetime(now_kst.year, now_kst.month, now_kst.day)
+            _dt.datetime(now_kst.year, now_kst.month, now_kst.day, 0, 0, 0)
             .replace(tzinfo=_dt.timezone.utc).timestamp()
-        ) - 9 * 3600
+        ) - 9 * 3600  # KST → UTC
 
         ts_list  = result.get("timestamp", [])
         cls_list = result["indicators"]["quote"][0].get("close", [])
 
-        prev_p_raw = 0.0
+        # 오늘 이전 거래일의 close 값 중 가장 최근 것 = 직전 거래일 종가
+        prev_p = 0
         for ts, cl in zip(reversed(ts_list), reversed(cls_list)):
             if cl is None or cl <= 0:
                 continue
             if ts < today_start_utc:
-                prev_p_raw = cl
+                prev_p = int(round(cl))
                 break
 
-        if prev_p_raw == 0:
+        # 폴백: 타임스탬프 비교 안되면 배열 끝에서 두 번째 값
+        if prev_p == 0:
             valid = [(t, cl) for t, cl in zip(ts_list, cls_list)
                      if cl is not None and cl > 0]
             if len(valid) >= 2:
-                prev_p_raw = valid[-2][1]
+                prev_p = int(round(valid[-2][1]))
 
-        if prev_p_raw == 0:
-            prev_p_raw = now_p_raw
+        if prev_p == 0:
+            prev_p = now_p
 
-        prev_p  = int(round(prev_p_raw * fx))
         chg_amt = now_p - prev_p
         chg_pct = (chg_amt / prev_p * 100) if prev_p > 0 else 0.0
         return now_p, round(chg_pct, 2), chg_amt
@@ -1016,7 +990,7 @@ def _render_holdings_tab(
     disp_df = pd.DataFrame(rows)
 
     # ══════════════════════════════════════════════════════
-    # 1. 계좌별 요약 카드 (상단)
+    # 1. 전체 합계 카드 (1행) + 계좌별 소계 카드 (2행)
     # ══════════════════════════════════════════════════════
     _total_eval = disp_df["평가금액"].sum()
     _total_buy  = disp_df["매입금액"].sum()
@@ -1025,10 +999,8 @@ def _render_holdings_tab(
     _total_day  = disp_df["전일대비(원)"].sum()
     _total_day_pct = (_total_day / (_total_eval - _total_day) * 100) if (_total_eval - _total_day) > 0 else 0
 
+    # 1행: 전체 합계
     c1, c2, c3, c4 = st.columns(4)
-    _ret_c = "#7dffb0" if _total_ret >= 0 else "#FF4B4B"
-    _day_c = "#7dffb0" if _total_day >= 0 else "#FF4B4B"
-
     c1.metric("계좌 평가액", f"{_total_eval:,.0f}원",
               delta=f"{_total_day:+,.0f}원 ({_total_day_pct:+.2f}%)",
               delta_color="normal" if _total_day >= 0 else "inverse")
@@ -1038,72 +1010,147 @@ def _render_holdings_tab(
     c4.metric("계좌 수익률", f"{_total_ret:+.2f}%",
               delta_color="normal" if _total_ret >= 0 else "inverse")
 
+    # 2행: 계좌별 소계 카드
+    _ACC_ORDER  = ["IRP", "연금저축", "ISA", "일반"]
+    _ACC_COLOR  = {"IRP":"#87CEEB","연금저축":"#FFD700","ISA":"#7dffb0","일반":"#AFA9EC"}
+    _ACC_BG     = {"IRP":"rgba(135,206,235,0.12)","연금저축":"rgba(255,215,0,0.10)",
+                   "ISA":"rgba(125,255,176,0.10)","일반":"rgba(175,169,236,0.10)"}
+    _acc_grp = disp_df.groupby("계좌").agg(
+        평가금액=("평가금액","sum"), 매입금액=("매입금액","sum"), 손익=("손익","sum")
+    ).reset_index()
+    _sorted_accs = sorted(_acc_grp.to_dict("records"),
+                          key=lambda r: _ACC_ORDER.index(r["계좌"]) if r["계좌"] in _ACC_ORDER else 99)
+
+    _acols = st.columns(len(_sorted_accs))
+    for _ai, _ar in enumerate(_sorted_accs):
+        _an = _ar["계좌"]
+        _ae, _ab, _ag = _ar["평가금액"], _ar["매입금액"], _ar["손익"]
+        _ar2 = (_ag / _ab * 100) if _ab > 0 else 0
+        _bc  = _ACC_COLOR.get(_an, "#AFA9EC")
+        _bg  = _ACC_BG.get(_an, "rgba(175,169,236,0.10)")
+        _gc  = "#7dffb0" if _ag >= 0 else "#FF4B4B"
+        with _acols[_ai]:
+            st.markdown(
+                f"<div style='background:{_bg};border:1px solid rgba(255,255,255,0.08);"
+                f"border-top:3px solid {_bc};border-radius:8px;padding:10px 12px;margin-top:10px;'>"
+                f"<div style='font-size:0.72rem;font-weight:700;color:{_bc};margin-bottom:6px;'>{_an}</div>"
+                f"<div style='font-size:0.78rem;color:rgba(255,255,255,0.45);margin-bottom:1px;'>평가액</div>"
+                f"<div style='font-size:0.92rem;font-weight:600;margin-bottom:3px;'>{_ae:,.0f}원</div>"
+                f"<div style='font-size:0.72rem;color:rgba(255,255,255,0.35);'>매입 {_ab:,.0f}원</div>"
+                f"<div style='font-size:0.80rem;color:{_gc};margin-top:4px;font-weight:600;'>"
+                f"{_ag:+,.0f}원 ({_ar2:+.2f}%)</div></div>",
+                unsafe_allow_html=True,
+            )
+
     # ══════════════════════════════════════════════════════
-    # 2. 보유종목 테이블
+    # 2. 보유종목 테이블 (계좌 컬럼 + 계좌별 구분 헤더행)
     # ══════════════════════════════════════════════════════
     st.divider()
 
-    tbl_cols = ["종목명","수량","매입단가","매입금액","현재가",
-                "평가금액","손익","전일대비(원)","전일대비(%)","누적수익률(%)",
-                "주당분배금","월분배금","분배율(%)"]
-
-    # ── 색상 컬럼 적용 (Styler) ──────────────────────────
-    _color_cols = ["손익","전일대비(원)","전일대비(%)","누적수익률(%)"]
-
-    def _style_pnl(df):
-        """손익 컬럼 음양에 따라 텍스트 색상 적용"""
-        styles = pd.DataFrame("", index=df.index, columns=df.columns)
-        for col in _color_cols:
-            if col in df.columns:
-                styles[col] = df[col].apply(
-                    lambda v: "color: #FF4B4B; font-weight:600"   # 양수 → 빨강
-                    if isinstance(v, (int,float)) and v > 0
-                    else ("color: #4B9EFF; font-weight:600"        # 음수 → 파랑
-                          if isinstance(v, (int,float)) and v < 0
-                          else "color: rgba(255,255,255,0.4)")
-                )
-        return styles
-
-    # 포맷 함수 정의
-    def _fmt(df):
-        fmt = {}
-        for col in df.columns:
-            if col in ("손익","전일대비(원)"):
-                fmt[col] = lambda v: f"{v:+,.0f}" if isinstance(v,(int,float)) else v
-            elif col in ("전일대비(%)","누적수익률(%)","분배율(%)"):
-                fmt[col] = lambda v: f"{v:+.2f}%" if isinstance(v,(int,float)) else v
-            elif col in ("수량","매입단가","매입금액","현재가","평가금액","주당분배금","월분배금"):
-                fmt[col] = lambda v: f"{v:,.0f}" if isinstance(v,(int,float)) else v
-        return fmt
-
-    _styled = (
-        disp_df[tbl_cols]
-        .style
-        .apply(_style_pnl, axis=None)
-        .format(_fmt(disp_df[tbl_cols]))
+    # 계좌 순서대로 정렬
+    disp_df["_acc_ord"] = disp_df["계좌"].apply(
+        lambda x: _ACC_ORDER.index(x) if x in _ACC_ORDER else 99
     )
+    disp_df = disp_df.sort_values(["_acc_ord","종목명"]).drop(columns=["_acc_ord"])
 
-    # 종목 선택 — 색상 테이블과 분리해서 인덱스 선택 radio로 처리
+    # 색상 컬럼
+    _color_cols = ["손익","전일대비(원)","전일대비(%)","누적수익률(%)"]
+    _num_cols   = {"수량","매입단가","매입금액","현재가","평가금액",
+                   "손익","전일대비(원)","전일대비(%)","누적수익률(%)",
+                   "주당분배금","월분배금","분배율(%)"}
+
+    def _cv(v, col):
+        if col in _color_cols and isinstance(v,(int,float)):
+            if v > 0: return "color:#FF4B4B;font-weight:600"
+            if v < 0: return "color:#4B9EFF;font-weight:600"
+        return ""
+
+    def _fv(v, col):
+        if col in ("손익","전일대비(원)"):
+            return f"{v:+,.0f}" if isinstance(v,(int,float)) else str(v)
+        if col in ("전일대비(%)","누적수익률(%)","분배율(%)"):
+            return f"{v:+.2f}%" if isinstance(v,(int,float)) else str(v)
+        if col in ("수량","매입단가","매입금액","현재가","평가금액","주당분배금","월분배금"):
+            return f"{v:,.0f}" if isinstance(v,(int,float)) else str(v)
+        return str(v) if not (isinstance(v,float) and v!=v) else "-"
+
+    _tbl_cols = ["계좌","종목명","수량","매입단가","매입금액","현재가",
+                 "평가금액","손익","전일대비(원)","전일대비(%)","누적수익률(%)",
+                 "주당분배금","월분배금","분배율(%)"]
+    _hdrs     = ["계좌","종목명","수량","매입단가","매입금액","현재가",
+                 "평가금액","손익","전일대비(원)","전일대비(%)","수익률(%)",
+                 "주당분배금","월분배금","분배율(%)"]
+
+    _TH = ("background:rgba(255,255,255,0.06);padding:7px 10px;"
+           "font-size:0.76rem;font-weight:600;color:rgba(255,255,255,0.5);"
+           "border-bottom:1px solid rgba(255,255,255,0.1);white-space:nowrap;")
+    _TR = "border-bottom:0.5px solid rgba(255,255,255,0.06);"
+    _SEP= ("background:rgba(255,255,255,0.03);padding:5px 10px;"
+           "font-size:0.75rem;color:rgba(255,255,255,0.5);"
+           "border-bottom:1px solid rgba(255,255,255,0.15);")
+
+    _rows_html = []
+    _prev_acc  = None
+    for _, row in disp_df.iterrows():
+        acc = str(row.get("계좌",""))
+
+        # 계좌 구분 헤더행
+        if acc != _prev_acc:
+            _ag2 = _acc_grp[_acc_grp["계좌"]==acc]
+            if not _ag2.empty:
+                _ge = int(_ag2["평가금액"].iloc[0])
+                _gb = int(_ag2["매입금액"].iloc[0])
+                _gg = int(_ag2["손익"].iloc[0])
+                _gr = (_gg/_gb*100) if _gb>0 else 0
+                _gc2 = "#7dffb0" if _gg>=0 else "#FF4B4B"
+                _bc2 = _ACC_COLOR.get(acc,"#AFA9EC")
+                _bg2 = _ACC_BG.get(acc,"")
+                _rows_html.append(
+                    f'<tr><td colspan="{len(_tbl_cols)}" style="{_SEP}">'
+                    f'<span style="font-size:0.71rem;font-weight:700;padding:2px 8px;border-radius:4px;'
+                    f'background:{_bg2};color:{_bc2};">{acc}</span>'
+                    f'&nbsp;&nbsp;평가 {_ge:,.0f}원 &nbsp;·&nbsp; 매입 {_gb:,.0f}원 &nbsp;·&nbsp;'
+                    f' 손익 <span style="color:{_gc2};font-weight:600;">{_gg:+,.0f}원 ({_gr:+.2f}%)</span>'
+                    f'</td></tr>'
+                )
+            _prev_acc = acc
+
+        cells = []
+        for col in _tbl_cols:
+            v  = row.get(col,"")
+            al = "right" if col in _num_cols else "left"
+            td = f"padding:6px 10px;font-size:0.82rem;text-align:{al};white-space:nowrap;"
+            if col == "계좌":
+                _bc3 = _ACC_COLOR.get(acc,"#AFA9EC")
+                _bg3 = _ACC_BG.get(acc,"")
+                cells.append(
+                    f'<td style="{td}">'
+                    f'<span style="font-size:0.69rem;font-weight:700;padding:2px 7px;border-radius:4px;'
+                    f'background:{_bg3};color:{_bc3};">{acc}</span></td>'
+                )
+            else:
+                cells.append(f'<td style="{td}{_cv(v,col)}">{_fv(v,col)}</td>')
+        _rows_html.append(f'<tr style="{_TR}">{"".join(cells)}</tr>')
+
+    _hdr_html = "".join(
+        f'<th style="{_TH}text-align:{"right" if h in _num_cols else "left"}">{h}</th>'
+        for h in _hdrs
+    )
+    _table_html = (
+        f'<div style="overflow-x:auto;border:1px solid rgba(255,255,255,0.1);'
+        f'border-radius:8px;margin-top:8px;">'
+        f'<table style="width:100%;border-collapse:collapse;">'
+        f'<thead><tr>{_hdr_html}</tr></thead>'
+        f'<tbody>{"".join(_rows_html)}</tbody>'
+        f'</table></div>'
+    )
+    st.markdown(_table_html, unsafe_allow_html=True)
+
+    # 종목 선택 셀렉트박스 (상세 연동용)
     _sel_nm_key = st.session_state.get("hld_sel_nm", "")
     _nm_list    = disp_df["종목명"].tolist()
     if _sel_nm_key not in _nm_list:
         _sel_nm_key = _nm_list[0] if _nm_list else ""
-
-    st.dataframe(
-        _styled,
-        hide_index=True, use_container_width=True,
-        column_config={
-            "수량":       st.column_config.NumberColumn(),
-            "매입단가":   st.column_config.NumberColumn(),
-            "매입금액":   st.column_config.NumberColumn(),
-            "현재가":     st.column_config.NumberColumn(),
-            "평가금액":   st.column_config.NumberColumn(),
-            "주당분배금": st.column_config.NumberColumn(),
-            "월분배금":   st.column_config.NumberColumn(),
-        },
-    )
-
-    # 종목 선택 셀렉트박스 (상세 연동용)
     _sel_nm = st.selectbox(
         "상세 분석 종목",
         _nm_list,

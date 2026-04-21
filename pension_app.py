@@ -5275,20 +5275,22 @@ def _render_reinvest_tab(
     base_monthly = irp_income + isa_income + ps_income + gen_income
     base_asset   = sum(it["price"] * it["qty"] for it in all_items if it["price"] > 0)
 
-    # ── 파라미터 입력 ──────────────────────────────────────────────
+    # ── 파라미터 입력 (재투자 비율 슬라이더 제거 — 배분% 합계가 곧 재투자 비율) ──
     st.markdown("#### ⚙️ 시뮬레이션 파라미터")
-    p1, p2, p3, p4 = st.columns(4)
-    ri_pct   = p1.slider("재투자 비율 (%)",    0,  80, 20, 5,  key="ri_pct")
-    sim_yr   = p2.slider("시뮬레이션 기간 (년)", 1, 15,  5, 1,  key="ri_yr")
-    inf_pct  = p3.slider("물가상승률 (%/년)",   0.0, 5.0, 2.0, 0.5, key="ri_inf")
-    ri_tgt   = p4.number_input(
+    p1, p2, p3 = st.columns(3)
+    sim_yr   = p1.slider("시뮬레이션 기간 (년)", 1, 15,  5, 1,  key="ri_yr")
+    inf_pct  = p2.slider("물가상승률 (%/년)",   0.0, 5.0, 2.0, 0.5, key="ri_inf")
+    ri_tgt   = p3.number_input(
         "목표 생활비 (원/월)", value=int(target_monthly),
         step=100_000, key="ri_tgt",
     )
 
     # ── 종목별 배분·상승률 설정 ───────────────────────────────────
     st.markdown("#### 📋 종목별 재투자 배분 및 주가 상승률 설정")
-    st.caption("체크박스로 재투자 대상 선택 → 배분% 합계 100% 맞추기 · 상승률 = 연간 예측 주가 상승률")
+    st.caption(
+        "배분% = 월 분배금 중 해당 종목 매수에 쓸 비율 (예: 10% → 월 분배금의 10%를 이 종목에 재투자) "
+        "· 종목별 배분%의 합계가 자동으로 재투자 비율이 됩니다 · 상승률 = 연간 예측 주가 상승률"
+    )
 
     ACC_COLORS = {
         "IRP":    ("#87CEEB", "rgba(135,206,235,0.12)"),
@@ -5298,7 +5300,7 @@ def _render_reinvest_tab(
     }
 
     hdr_cols = st.columns([0.3, 2.8, 1.0, 0.8, 0.8, 0.8, 0.8])
-    for label, col in zip(["","종목명","계좌","현재가","배분%","상승률%/년","월분배금"], hdr_cols):
+    for label, col in zip(["","종목명","계좌","현재가","배분%/월","상승률%/년","월분배금"], hdr_cols):
         col.markdown(
             f"<div style='font-size:0.72rem;color:rgba(255,255,255,0.4);padding-bottom:4px;'>{label}</div>",
             unsafe_allow_html=True,
@@ -5308,7 +5310,7 @@ def _render_reinvest_tab(
     for i, it in enumerate(all_items):
         bc, bg = ACC_COLORS.get(it["acc"], ("#AFA9EC", "rgba(175,169,236,0.10)"))
         cols = st.columns([0.3, 2.8, 1.0, 0.8, 0.8, 0.8, 0.8])
-        sel   = cols[0].checkbox("", value=(i < 3), key=f"ri_sel_{i}",
+        sel   = cols[0].checkbox("", value=(i < 4), key=f"ri_sel_{i}",
                                   label_visibility="collapsed")
         cols[1].markdown(
             f"<div style='padding:4px 0;font-size:0.85rem;'>{it['nm'][:28]}</div>",
@@ -5323,8 +5325,8 @@ def _render_reinvest_tab(
             f"<div style='padding:4px 0;font-size:0.82rem;text-align:right;'>"
             f"{int(it['price']):,}원</div>", unsafe_allow_html=True,
         )
-        alloc = cols[4].number_input("배분%", 0, 100, value=(30 if i==0 else 20 if i==1 else 0),
-                                      step=5, key=f"ri_alloc_{i}",
+        alloc = cols[4].number_input("배분%", 0, 100, value=(5 if i < 4 else 0),
+                                      step=1, key=f"ri_alloc_{i}",
                                       label_visibility="collapsed")
         rise  = cols[5].number_input("상승률", -5.0, 20.0, value=0.0, step=0.5,
                                       key=f"ri_rise_{i}",
@@ -5335,17 +5337,28 @@ def _render_reinvest_tab(
         )
         item_configs.append({**it, "sel": sel, "alloc": alloc, "rise": rise})
 
-    # 배분 합계 경고
+    # 배분% 합계 = 재투자 비율 (자동 계산, 제한 없음)
     alloc_sum = sum(c["alloc"] for c in item_configs if c["sel"])
-    if alloc_sum != 100 and any(c["sel"] for c in item_configs):
-        st.warning(f"⚠️ 배분 합계: {alloc_sum}% (100%가 되어야 합니다)")
-    else:
-        st.caption(f"배분 합계: {alloc_sum}%  ✅")
+    ri_pct    = alloc_sum   # 종목별 배분% 합계가 곧 재투자 비율
+    consume_pct = 100 - ri_pct
+
+    _ri_color = "#FF4B4B" if ri_pct > 80 else "#FFD700" if ri_pct > 50 else "#7dffb0"
+    st.markdown(
+        f"<div style='display:flex;gap:24px;padding:8px 0;font-size:0.82rem;'>"
+        f"<span>재투자 비율: <b style='color:{_ri_color};font-size:1.0rem;'>{ri_pct}%</b></span>"
+        f"<span style='color:rgba(255,255,255,0.5);'>→ 실수령 비율: <b style='color:#7dffb0;'>{consume_pct}%</b></span>"
+        f"<span style='color:rgba(255,255,255,0.35);'>재투자액: <b>{base_monthly*ri_pct/100:,.0f}원/월</b></span>"
+        f"<span style='color:rgba(255,255,255,0.35);'>실수령: <b>{base_monthly*consume_pct/100:,.0f}원/월</b></span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    if ri_pct > 80:
+        st.warning("⚠️ 재투자 비율이 80%를 초과합니다. 실수령 생활비가 매우 줄어듭니다.")
 
     st.divider()
 
     # ── 시뮬레이션 엔진 ─────────────────────────────────────────
-    def _simulate(ri_pct_val, years, with_reinvest, with_rise):
+    def _simulate(years, with_reinvest, with_rise):
         months = years * 12
         qtys   = [c["qty"]   for c in item_configs]
         prices = [c["price"] for c in item_configs]
@@ -5354,27 +5367,30 @@ def _render_reinvest_tab(
 
         rows = []
         for m in range(1, months + 1):
-            # 주가 상승 반영
+            # 주가 상승 반영 (월 복리)
             if with_rise:
                 for i, c in enumerate(item_configs):
                     if c["rise"] != 0:
-                        prices[i] = c["price"] * ((1 + c["rise"]/100/12) ** m)
+                        prices[i] = c["price"] * ((1 + c["rise"] / 100 / 12) ** m)
 
-            # 월 분배금
-            monthly = sum(c["dps"] * qtys[i] for i, c in enumerate(item_configs))                       + isa_income + ps_income + gen_income                       - sum(c["dps"] * c["qty"] for c in item_configs)
-            # ※ isa/ps/gen은 고정 (분배금 변동 미반영)
+            # 월 분배금 (재투자로 늘어난 수량 반영)
+            monthly = (
+                sum(c["dps"] * qtys[i] for i, c in enumerate(item_configs))
+                + isa_income + ps_income + gen_income
+                - sum(c["dps"] * c["qty"] for c in item_configs)
+            )
 
-            ri_amt   = monthly * ri_pct_val / 100 if with_reinvest else 0.0
-            consume  = monthly - ri_amt
+            # 종목별 배분% = 월 분배금의 몇 %를 이 종목에 투자
+            # ri_amt = 각 종목별 개별 계산 (합산이 총 재투자액)
+            added_qty = 0
+            added_dps = 0.0
+            total_ri  = 0.0
 
-            # 재투자 실행
-            added_qty   = 0
-            added_dps   = 0.0
-            alloc_total = sum(c["alloc"] for c in item_configs if c["sel"]) or 1
-            if with_reinvest and ri_amt > 0:
+            if with_reinvest:
                 for i, c in enumerate(item_configs):
-                    if not c["sel"]: continue
-                    buy_amt = ri_amt * (c["alloc"] / alloc_total)
+                    if not c["sel"] or c["alloc"] <= 0: continue
+                    buy_amt = monthly * c["alloc"] / 100   # ★ 월 분배금의 alloc%
+                    total_ri += buy_amt
                     if prices[i] <= 0: continue
                     nq = int(buy_amt / prices[i])
                     qtys[i]      += nq
@@ -5382,11 +5398,11 @@ def _render_reinvest_tab(
                     added_qty    += nq
                     added_dps    += nq * c["dps"]
 
-            # 자산 평가
+            consume  = monthly - total_ri
             asset    = sum(prices[i] * qtys[i] for i in range(len(item_configs)))
             cum_dist += monthly
             rows.append({
-                "m": m, "monthly": monthly, "ri": ri_amt,
+                "m": m, "monthly": monthly, "ri": total_ri,
                 "consume": consume, "asset": asset,
                 "added_qty": added_qty,
                 "cum_extra": sum(cum_extra),
@@ -5394,9 +5410,9 @@ def _render_reinvest_tab(
             })
         return rows
 
-    sim_A = _simulate(ri_pct, sim_yr, True,  True)   # 재투자+상승
-    sim_B = _simulate(ri_pct, sim_yr, True,  False)  # 재투자만
-    sim_C = _simulate(0,      sim_yr, False, True)   # 기준(상승만)
+    sim_A = _simulate(sim_yr, True,  True)    # 재투자+상승
+    sim_B = _simulate(sim_yr, True,  False)   # 재투자만
+    sim_C = _simulate(sim_yr, False, True)    # 기준(상승만)
 
     # ── KPI 카드 ────────────────────────────────────────────────
     st.markdown("#### 📊 시뮬레이션 결과 요약")

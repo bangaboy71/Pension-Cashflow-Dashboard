@@ -61,6 +61,19 @@ IRP_PENSION_PERSONAL_TAX = {  # 나이 → 세율(지방세 포함)
 
 
 
+"""
+household_tab_patch.py
+======================
+pension_app.py 의 _render_household_tab() 함수를 아래 버전으로 교체하세요.
+
+추가된 기능:
+  1. 월별 요약 카드 — 전월 대비 증감 delta 표시
+  2. 카테고리별 수입·지출 목록 — 전월 대비 증감 인라인 표시
+  3. [NEW] 카테고리별 월별 증감 추이 차트 (수입/지출 각각)
+  4. [NEW] 지출 카테고리 히트맵 — 월×카테고리 매트릭스
+  5. 기존 월별 추이·연간 누계·상세 내역 유지
+"""
+
 def _render_household_tab(
     hh_df,
     display_income: float,
@@ -2838,8 +2851,6 @@ with st.status("📡 연금 데이터를 불러오는 중...", expanded=True) as
         sc_df           = pd.DataFrame()
         sc_names        = []
         sc_default_name = ""
-    # ★ 원본 sc_df 보존 — 이후 루프 변수(sc_df)에 의해 덮어쓰이는 것을 방지
-    _sc_df_original = sc_df.copy() if not sc_df.empty else pd.DataFrame()
 
     # STEP 5 — 가계부 로드
     st.write("📒 가계부 데이터 로드 중...")
@@ -3257,28 +3268,27 @@ else:
     else:
         _irp_personal_r = float(st.session_state.get("irp_personal_ratio", 0)) / 100
 
-# ── ② 분배금과세 시트 → 실제 과세표준 계산 (시나리오 모드 포함 항상 로드) ──
+# ── ② 분배금과세 시트 → 실제 과세표준 계산 (기본모드 전용) ──
 _now_ym = datetime.now().strftime("%Y-%m")
 _taxbase_result = {"has_data": False}
 
-# 시나리오 모드와 무관하게 항상 분배금과세 시트 로드 시도
-# → 과세관리 탭에서 시나리오 연동이 끊기는 문제 방지
-@st.cache_data(ttl=DATA_TTL, show_spinner=False)
-def _load_dist_tax_inner(url: str, gid: str) -> pd.DataFrame:
-    try:
-        from pension_tax_monitor import load_dist_tax_sheet
-        return load_dist_tax_sheet(url, gid)
-    except Exception:
-        return pd.DataFrame()
-
-_dist_tax_gid = st.secrets.get("DIST_TAX_SHEET_GID", "")
-try:
-    dist_tax_df = _load_dist_tax_inner(SHEET_URL, _dist_tax_gid) if _dist_tax_gid else pd.DataFrame()
-except Exception:
-    dist_tax_df = pd.DataFrame()
-
-# 과세표준 계산 (기본모드 전용 — 시나리오 모드에서는 tax_monitor 내부에서 sc_df로 계산)
 if not _sc_applied:
+    # 분배금과세 시트 로드
+    @st.cache_data(ttl=DATA_TTL, show_spinner=False)
+    def _load_dist_tax_inner(url: str, gid: str) -> pd.DataFrame:
+        try:
+            from pension_tax_monitor import load_dist_tax_sheet
+            return load_dist_tax_sheet(url, gid)
+        except Exception:
+            return pd.DataFrame()
+
+    _dist_tax_gid = st.secrets.get("DIST_TAX_SHEET_GID", "")
+    try:
+        dist_tax_df = _load_dist_tax_inner(SHEET_URL, _dist_tax_gid)
+    except Exception:
+        dist_tax_df = pd.DataFrame()
+
+    # 과세표준 계산
     try:
         _taxbase_result = calc_irp_taxbase_from_sheet(
             dist_tax_df=dist_tax_df,
@@ -3287,6 +3297,9 @@ if not _sc_applied:
         )
     except Exception:
         _taxbase_result = {"has_data": False}
+else:
+    # 시나리오 모드: 과세표준 시트 연동 안 함
+    dist_tax_df = pd.DataFrame()
 
 # ── ③ 세후 계산: irp_income은 항상 실제 분배금으로 전달 ──────
 # calc_after_tax의 irp_income 인자 = 실제 분배금 (변경 없음)
@@ -3381,11 +3394,12 @@ if sc_choice != "기본 시트 현황" and sc_names:
     )
 
 # ── 메인 탭 ──────────────────────────────────────────
-_main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5, _main_tab6, _main_tab7, _main_tab8 = st.tabs([
+_main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5, _main_tab6, _main_tab7, _main_tab8, _main_tab9 = st.tabs([
     "📊 현금흐름 대시보드", "📒 월별 가계부",
     "📈 보유종목", "🔍 관심종목",
     "📐 수익률 벤치마크", "🎲 Monte Carlo",
     "🤖 AI 자문", "🏦 과세관리",
+    "♻️ 재투자 시뮬레이터",
 ])
 
 with _main_tab2:
@@ -4611,9 +4625,9 @@ with _main_tab1:
     # ── 고갈 시점 요약 카드 ───────────────────────────────
     st.markdown("#### 📌 시나리오별 고갈 시점")
     hd_cols = st.columns(3)
-    for i, (sc_name, _sc_sim_df) in enumerate(sc_dfs.items()):
-        irp_yr, irp_age = find_exhaust(_sc_sim_df, "IRP잔액")
-        isa_yr, isa_age = find_exhaust(_sc_sim_df, "ISA잔액")
+    for i, (sc_name, sc_df) in enumerate(sc_dfs.items()):
+        irp_yr, irp_age = find_exhaust(sc_df, "IRP잔액")
+        isa_yr, isa_age = find_exhaust(sc_df, "ISA잔액")
         line_color = sc_colors[sc_name][0]
         with hd_cols[i]:
             with st.container(border=True):
@@ -4649,13 +4663,13 @@ with _main_tab1:
             fig_bal = go.Figure()
 
             # 시나리오별 잔액 라인
-            for sc_name, _sc_sim_df in sc_dfs.items():
+            for sc_name, sc_df in sc_dfs.items():
                 line_c, fill_c = sc_colors[sc_name]
-                exhaust_yr, exhaust_age = find_exhaust(_sc_sim_df, bal_col)
+                exhaust_yr, exhaust_age = find_exhaust(sc_df, bal_col)
 
                 fig_bal.add_trace(go.Scatter(
-                    x=_sc_sim_df["연도"],
-                    y=_sc_sim_df[bal_col] / 100_000_000,
+                    x=sc_df["연도"],
+                    y=sc_df[bal_col] / 100_000_000,
                     name=sc_name,
                     mode="lines",
                     line=dict(color=line_c, width=2.5),
@@ -4697,11 +4711,11 @@ with _main_tab1:
             # 월 수익 추이 (보조 차트)
             st.markdown(f"**📈 {asset} 월 수익 추이 (시나리오별)**")
             fig_inc = go.Figure()
-            for sc_name, _sc_sim_df in sc_dfs.items():
+            for sc_name, sc_df in sc_dfs.items():
                 line_c, _ = sc_colors[sc_name]
                 fig_inc.add_trace(go.Scatter(
-                    x=_sc_sim_df["연도"],
-                    y=_sc_sim_df[inc_col] / 10000,
+                    x=sc_df["연도"],
+                    y=sc_df[inc_col] / 10000,
                     name=sc_name,
                     mode="lines",
                     line=dict(color=line_c, width=2),
@@ -4725,14 +4739,14 @@ with _main_tab1:
     st.markdown("#### 🔗 IRP + ISA 통합 잔액 시나리오 비교")
 
     fig_total_bal = go.Figure()
-    for sc_name, _sc_sim_df in sc_dfs.items():
+    for sc_name, sc_df in sc_dfs.items():
         line_c, fill_c = sc_colors[sc_name]
-        total_bal = _sc_sim_df["IRP잔액"] + _sc_sim_df["ISA잔액"]
+        total_bal = sc_df["IRP잔액"] + sc_df["ISA잔액"]
         exhaust_mask = total_bal <= 0
-        exhaust_yr_total = _sc_sim_df[exhaust_mask]["연도"].min() if exhaust_mask.any() else None
+        exhaust_yr_total = sc_df[exhaust_mask]["연도"].min() if exhaust_mask.any() else None
 
         fig_total_bal.add_trace(go.Scatter(
-            x=_sc_sim_df["연도"],
+            x=sc_df["연도"],
             y=total_bal / 100_000_000,
             name=sc_name,
             mode="lines",
@@ -4771,10 +4785,10 @@ with _main_tab1:
 
     # 시나리오별 요약 인사이트
     ins1, ins2, ins3 = st.columns(3)
-    for ins_col, (sc_name, _sc_sim_df) in zip([ins1, ins2, ins3], sc_dfs.items()):
+    for ins_col, (sc_name, sc_df) in zip([ins1, ins2, ins3], sc_dfs.items()):
         line_c = sc_colors[sc_name][0]
-        total_bal_last = _sc_sim_df["IRP잔액"].iloc[-1] + _sc_sim_df["ISA잔액"].iloc[-1]
-        total_income_sum = (_sc_sim_df["IRP월수익"] + _sc_sim_df["ISA월수익"]).sum()
+        total_bal_last = sc_df["IRP잔액"].iloc[-1] + sc_df["ISA잔액"].iloc[-1]
+        total_income_sum = (sc_df["IRP월수익"] + sc_df["ISA월수익"]).sum()
         with ins_col:
             st.markdown(
                 f"<div style='background:rgba(255,255,255,0.03); padding:12px; "
@@ -5218,23 +5232,398 @@ with _main_tab7:
 
 
 # ════════════════════════════════════════════════════════
+# ♻️ 재투자 시뮬레이터 탭
+# ════════════════════════════════════════════════════════
+def _render_reinvest_tab(
+    pension_items: dict,
+    irp_income: float,
+    isa_income: float,
+    ps_income: float,
+    gen_income: float,
+    irp_total: float,
+    isa_total: float,
+    ps_total: float,
+    target_monthly: float,
+    sc_df: pd.DataFrame,
+    sc_names: list,
+):
+    """♻️ 재투자 시뮬레이터 — 분배금 일부 재투자 시 복리·자산 성장 시뮬레이션"""
+    import math as _math
+    import plotly.graph_objects as _go
+
+    st.markdown(
+        "<h3 style='margin-bottom:0.2rem;'>♻️ 재투자 시뮬레이터</h3>"
+        "<p style='color:rgba(255,255,255,0.5);font-size:0.83rem;margin-top:0;'>"
+        "월 분배금의 일부를 선택 종목에 재투자 시 복리 성장·자산 증감·현금흐름을 3가지 시나리오로 비교합니다.</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── 보유 종목 수집 ───────────────────────────────────────────
+    all_items = []
+    for acc, items in pension_items.items():
+        for it in items:
+            nm    = str(it.get("종목명","")).strip()
+            qty   = float(it.get("수량",  0) or 0)
+            dps   = float(it.get("주당분배금", 0) or 0)
+            price = float(it.get("현재가", 0) or 0)
+            amt   = float(it.get("원금",  0) or 0)
+            rate  = float(it.get("분배율(%)", 0) or 0)
+            memo  = str(it.get("메모","")).strip()
+            if not nm or nm in ("nan","") or qty == 0:
+                continue
+            if price == 0 and amt > 0 and qty > 0:
+                price = amt / qty
+            src = "개인납입" if any(k in memo for k in ["개인","납입"]) else "퇴직금"
+            monthly = qty * dps if dps > 0 else amt * rate / 100
+            all_items.append({
+                "nm": nm, "acc": acc, "qty": qty, "dps": dps,
+                "price": price, "amt": amt, "rate": rate,
+                "src": src, "monthly": monthly,
+            })
+
+    if not all_items:
+        st.info("연금현황 시트에 보유 종목(수량·주당분배금)을 입력하면 시뮬레이션이 활성화됩니다.")
+        return
+
+    base_monthly = irp_income + isa_income + ps_income + gen_income
+    base_asset   = sum(it["price"] * it["qty"] for it in all_items if it["price"] > 0)
+
+    # ── 파라미터 입력 ──────────────────────────────────────────────
+    st.markdown("#### ⚙️ 시뮬레이션 파라미터")
+    p1, p2, p3, p4 = st.columns(4)
+    ri_pct   = p1.slider("재투자 비율 (%)",    0,  80, 20, 5,  key="ri_pct")
+    sim_yr   = p2.slider("시뮬레이션 기간 (년)", 1, 15,  5, 1,  key="ri_yr")
+    inf_pct  = p3.slider("물가상승률 (%/년)",   0.0, 5.0, 2.0, 0.5, key="ri_inf")
+    ri_tgt   = p4.number_input(
+        "목표 생활비 (원/월)", value=int(target_monthly),
+        step=100_000, key="ri_tgt",
+    )
+
+    # ── 종목별 배분·상승률 설정 ───────────────────────────────────
+    st.markdown("#### 📋 종목별 재투자 배분 및 주가 상승률 설정")
+    st.caption("체크박스로 재투자 대상 선택 → 배분% 합계 100% 맞추기 · 상승률 = 연간 예측 주가 상승률")
+
+    ACC_COLORS = {
+        "IRP":    ("#87CEEB", "rgba(135,206,235,0.12)"),
+        "ISA":    ("#7dffb0", "rgba(125,255,176,0.12)"),
+        "연금저축": ("#FFD700", "rgba(255,215,0,0.10)"),
+        "일반":   ("#AFA9EC", "rgba(175,169,236,0.10)"),
+    }
+
+    hdr_cols = st.columns([0.3, 2.8, 1.0, 0.8, 0.8, 0.8, 0.8])
+    for label, col in zip(["","종목명","계좌","현재가","배분%","상승률%/년","월분배금"], hdr_cols):
+        col.markdown(
+            f"<div style='font-size:0.72rem;color:rgba(255,255,255,0.4);padding-bottom:4px;'>{label}</div>",
+            unsafe_allow_html=True,
+        )
+
+    item_configs = []
+    for i, it in enumerate(all_items):
+        bc, bg = ACC_COLORS.get(it["acc"], ("#AFA9EC", "rgba(175,169,236,0.10)"))
+        cols = st.columns([0.3, 2.8, 1.0, 0.8, 0.8, 0.8, 0.8])
+        sel   = cols[0].checkbox("", value=(i < 3), key=f"ri_sel_{i}",
+                                  label_visibility="collapsed")
+        cols[1].markdown(
+            f"<div style='padding:4px 0;font-size:0.85rem;'>{it['nm'][:28]}</div>",
+            unsafe_allow_html=True,
+        )
+        cols[2].markdown(
+            f"<div style='padding:4px 0;font-size:0.75rem;'>"
+            f"<span style='background:{bg};color:{bc};padding:1px 6px;border-radius:3px;font-weight:600;'>{it['acc']}</span></div>",
+            unsafe_allow_html=True,
+        )
+        cols[3].markdown(
+            f"<div style='padding:4px 0;font-size:0.82rem;text-align:right;'>"
+            f"{int(it['price']):,}원</div>", unsafe_allow_html=True,
+        )
+        alloc = cols[4].number_input("배분%", 0, 100, value=(30 if i==0 else 20 if i==1 else 0),
+                                      step=5, key=f"ri_alloc_{i}",
+                                      label_visibility="collapsed")
+        rise  = cols[5].number_input("상승률", -5.0, 20.0, value=0.0, step=0.5,
+                                      key=f"ri_rise_{i}",
+                                      label_visibility="collapsed")
+        cols[6].markdown(
+            f"<div style='padding:4px 0;font-size:0.82rem;text-align:right;'>"
+            f"{it['monthly']:,.0f}원</div>", unsafe_allow_html=True,
+        )
+        item_configs.append({**it, "sel": sel, "alloc": alloc, "rise": rise})
+
+    # 배분 합계 경고
+    alloc_sum = sum(c["alloc"] for c in item_configs if c["sel"])
+    if alloc_sum != 100 and any(c["sel"] for c in item_configs):
+        st.warning(f"⚠️ 배분 합계: {alloc_sum}% (100%가 되어야 합니다)")
+    else:
+        st.caption(f"배분 합계: {alloc_sum}%  ✅")
+
+    st.divider()
+
+    # ── 시뮬레이션 엔진 ─────────────────────────────────────────
+    def _simulate(ri_pct_val, years, with_reinvest, with_rise):
+        months = years * 12
+        qtys   = [c["qty"]   for c in item_configs]
+        prices = [c["price"] for c in item_configs]
+        cum_extra = [0] * len(item_configs)
+        cum_dist  = 0.0
+
+        rows = []
+        for m in range(1, months + 1):
+            # 주가 상승 반영
+            if with_rise:
+                for i, c in enumerate(item_configs):
+                    if c["rise"] != 0:
+                        prices[i] = c["price"] * ((1 + c["rise"]/100/12) ** m)
+
+            # 월 분배금
+            monthly = sum(c["dps"] * qtys[i] for i, c in enumerate(item_configs))                       + isa_income + ps_income + gen_income                       - sum(c["dps"] * c["qty"] for c in item_configs)
+            # ※ isa/ps/gen은 고정 (분배금 변동 미반영)
+
+            ri_amt   = monthly * ri_pct_val / 100 if with_reinvest else 0.0
+            consume  = monthly - ri_amt
+
+            # 재투자 실행
+            added_qty   = 0
+            added_dps   = 0.0
+            alloc_total = sum(c["alloc"] for c in item_configs if c["sel"]) or 1
+            if with_reinvest and ri_amt > 0:
+                for i, c in enumerate(item_configs):
+                    if not c["sel"]: continue
+                    buy_amt = ri_amt * (c["alloc"] / alloc_total)
+                    if prices[i] <= 0: continue
+                    nq = int(buy_amt / prices[i])
+                    qtys[i]      += nq
+                    cum_extra[i] += nq
+                    added_qty    += nq
+                    added_dps    += nq * c["dps"]
+
+            # 자산 평가
+            asset    = sum(prices[i] * qtys[i] for i in range(len(item_configs)))
+            cum_dist += monthly
+            rows.append({
+                "m": m, "monthly": monthly, "ri": ri_amt,
+                "consume": consume, "asset": asset,
+                "added_qty": added_qty,
+                "cum_extra": sum(cum_extra),
+                "cum_dist": cum_dist,
+            })
+        return rows
+
+    sim_A = _simulate(ri_pct, sim_yr, True,  True)   # 재투자+상승
+    sim_B = _simulate(ri_pct, sim_yr, True,  False)  # 재투자만
+    sim_C = _simulate(0,      sim_yr, False, True)   # 기준(상승만)
+
+    # ── KPI 카드 ────────────────────────────────────────────────
+    st.markdown("#### 📊 시뮬레이션 결과 요약")
+    tab_A, tab_B, tab_C = st.tabs(["A: 재투자+상승 (최적)", "B: 재투자만 (보수적)", "C: 기준 (상승만)"])
+
+    def _render_kpi_tab(sim, label):
+        final = sim[-1]
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("현재 월 분배금",   f"{base_monthly:,.0f}원")
+        k2.metric(
+            f"{sim_yr}년 후 월 분배금",
+            f"{final['monthly']:,.0f}원",
+            delta=f"{(final['monthly']-base_monthly)/base_monthly*100:+.1f}%",
+        )
+        k3.metric(
+            f"{sim_yr}년 후 자산 평가액",
+            f"{final['asset']/100_000_000:.2f}억원",
+            delta=f"{(final['asset']-base_asset)/base_asset*100:+.1f}%" if base_asset>0 else None,
+        )
+        k4.metric(
+            f"{sim_yr}년 누적 분배금",
+            f"{final['cum_dist']/100_000_000:.2f}억원",
+        )
+
+    with tab_A: _render_kpi_tab(sim_A, "A")
+    with tab_B: _render_kpi_tab(sim_B, "B")
+    with tab_C: _render_kpi_tab(sim_C, "C")
+
+    # ── 차트 3종 ────────────────────────────────────────────────
+    st.divider()
+    col_c1, col_c2, col_c3 = st.columns(3)
+
+    # 공통 layout
+    _layout = dict(
+        height=280, paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(255,255,255,0.02)", font_color="white",
+        legend=dict(orientation="h", y=-0.3, xanchor="center", x=0.5, font_size=10),
+        margin=dict(t=30, b=60, l=10, r=10),
+        hovermode="x unified",
+    )
+
+    # 분기별 x축 레이블
+    q_idx   = [i for i in range(len(sim_A)) if (i+1) % 3 == 0]
+    q_lbls  = [f"{(i+1)//12}y" if (i+1) % 12 == 0 else f"{(i+1)//3}q" for i in q_idx]
+    q_A_m   = [sim_A[i]["monthly"]/10000 for i in q_idx]
+    q_B_m   = [sim_B[i]["monthly"]/10000 for i in q_idx]
+    q_C_m   = [sim_C[i]["monthly"]/10000 for i in q_idx]
+
+    with col_c1:
+        st.markdown("**월 분배금 성장**")
+        fig1 = _go.Figure()
+        fig1.add_trace(_go.Scatter(x=q_lbls, y=q_A_m, name="A 재투자+상승",
+                                   line=dict(color="#7dffb0",width=2), mode="lines"))
+        fig1.add_trace(_go.Scatter(x=q_lbls, y=q_B_m, name="B 재투자만",
+                                   line=dict(color="#87CEEB",width=2,dash="dot"), mode="lines"))
+        fig1.add_trace(_go.Scatter(x=q_lbls, y=q_C_m, name="C 기준",
+                                   line=dict(color="#888780",width=1.5,dash="dash"), mode="lines"))
+        fig1.add_hline(y=ri_tgt*(1-ri_pct/100)/10000,
+                       line_dash="dot", line_color="#FFD700", line_width=1,
+                       annotation_text="실수령 목표",
+                       annotation_font_color="#FFD700", annotation_position="top left")
+        fig1.update_layout(**_layout,
+                           yaxis=dict(title="만원", tickformat=","),
+                           xaxis=dict(tickangle=-30))
+        st.plotly_chart(fig1, use_container_width=True)
+
+    with col_c2:
+        st.markdown("**자산 평가액 추이**")
+        q_A_a = [sim_A[i]["asset"]/100_000_000 for i in q_idx]
+        q_B_a = [sim_B[i]["asset"]/100_000_000 for i in q_idx]
+        q_C_a = [sim_C[i]["asset"]/100_000_000 for i in q_idx]
+        fig2 = _go.Figure()
+        fig2.add_trace(_go.Scatter(x=q_lbls, y=q_A_a, name="A",
+                                   line=dict(color="#7dffb0",width=2),
+                                   fill="tozeroy", fillcolor="rgba(125,255,176,0.05)", mode="lines"))
+        fig2.add_trace(_go.Scatter(x=q_lbls, y=q_B_a, name="B",
+                                   line=dict(color="#87CEEB",width=2,dash="dot"), mode="lines"))
+        fig2.add_trace(_go.Scatter(x=q_lbls, y=q_C_a, name="C",
+                                   line=dict(color="#888780",width=1.5,dash="dash"), mode="lines"))
+        fig2.update_layout(**_layout,
+                           yaxis=dict(title="억원", tickformat=".2f"),
+                           xaxis=dict(tickangle=-30))
+        st.plotly_chart(fig2, use_container_width=True)
+
+    with col_c3:
+        st.markdown("**현금흐름 vs 물가조정 목표**")
+        q_A_cf  = [sim_A[i]["consume"]/10000 for i in q_idx]
+        q_tgt_v = [ri_tgt*(1+inf_pct/100)**((i+1)/12)/10000 for i in q_idx]
+        fig3 = _go.Figure()
+        fig3.add_trace(_go.Scatter(x=q_lbls, y=q_A_cf, name="A 실수령",
+                                   line=dict(color="#FFD700",width=2),
+                                   fill="tozeroy", fillcolor="rgba(255,215,0,0.06)", mode="lines"))
+        fig3.add_trace(_go.Scatter(x=q_lbls, y=q_tgt_v, name="물가조정 목표",
+                                   line=dict(color="#FF4B4B",width=1.5,dash="dot"), mode="lines"))
+        fig3.update_layout(**_layout,
+                           yaxis=dict(title="만원", tickformat=","),
+                           xaxis=dict(tickangle=-30))
+        st.plotly_chart(fig3, use_container_width=True)
+
+    # ── 연도별 비교 테이블 ──────────────────────────────────────
+    st.divider()
+    st.markdown("#### 📋 연도별 시나리오 비교")
+
+    tbl_rows = []
+    for yr in range(1, sim_yr + 1):
+        idx = yr * 12 - 1
+        adj_tgt = ri_tgt * ((1 + inf_pct/100) ** yr)
+        a, b, c = sim_A[idx], sim_B[idx], sim_C[idx]
+        goal_pct = a["consume"] / adj_tgt * 100 if adj_tgt > 0 else 0
+        tbl_rows.append({
+            "연도": f"{yr}년",
+            "A 월분배금": f"{a['monthly']:,.0f}원",
+            "A 자산":     f"{a['asset']/100_000_000:.2f}억",
+            "A 실수령":   f"{a['consume']:,.0f}원",
+            "B 자산":     f"{b['asset']/100_000_000:.2f}억",
+            "B 실수령":   f"{b['consume']:,.0f}원",
+            "C 자산":     f"{c['asset']/100_000_000:.2f}억",
+            "C 실수령":   f"{c['consume']:,.0f}원",
+            "목표달성률": f"{goal_pct:.0f}%",
+            "물가목표":   f"{adj_tgt:,.0f}원",
+        })
+
+    st.dataframe(
+        pd.DataFrame(tbl_rows),
+        hide_index=True, use_container_width=True,
+    )
+
+    # ── 월별 상세 (토글) ────────────────────────────────────────
+    with st.expander("📅 월별 상세 현금흐름 (A 시나리오)", expanded=False):
+        st.caption("A: 재투자+주가상승 시나리오의 월별 상세")
+        detail_rows = []
+        for r in sim_A:
+            adj_tgt = ri_tgt * ((1 + inf_pct/100) ** (r["m"]/12))
+            detail_rows.append({
+                "월":         f"{r['m']}m",
+                "월분배금":    f"{r['monthly']:,.0f}원",
+                "재투자액":    f"{r['ri']:,.0f}원",
+                "매수수량":    f"{r['added_qty']}주",
+                "누적추가수량": f"{r['cum_extra']}주",
+                "자산평가액":  f"{r['asset']/100_000_000:.3f}억",
+                "실수령":      f"{r['consume']:,.0f}원",
+                "목표달성률":  f"{r['consume']/adj_tgt*100:.0f}%",
+            })
+        st.dataframe(pd.DataFrame(detail_rows), hide_index=True, use_container_width=True)
+
+    # ── 세금·제약 안내 ──────────────────────────────────────────
+    st.divider()
+    st.markdown("#### ⚠️ 재투자 시 유의사항")
+    cols_n = st.columns(3)
+    with cols_n[0]:
+        st.markdown(
+            "<div style='background:rgba(255,255,255,0.03);border-left:4px solid #FF4B4B;"
+            "padding:10px 14px;border-radius:0 8px 8px 0;font-size:0.83rem;line-height:1.7;'>"
+            "<b style='color:#FF4B4B;'>과세 발생</b><br>"
+            "분배금을 재투자해도 수령 시점에 과세됩니다. IRP 퇴직금 원천: 0.76~1.1% 퇴직소득세,"
+            " 개인납입·연금저축: 5.5% 연금소득세. 세후 금액으로 재투자됩니다.</div>",
+            unsafe_allow_html=True,
+        )
+    with cols_n[1]:
+        st.markdown(
+            "<div style='background:rgba(255,255,255,0.03);border-left:4px solid #FFD700;"
+            "padding:10px 14px;border-radius:0 8px 8px 0;font-size:0.83rem;line-height:1.7;'>"
+            "<b style='color:#FFD700;'>납입 한도</b><br>"
+            "IRP·연금저축 추가 납입 시 연간 한도(각 1,800만원) 확인이 필요합니다."
+            " 퇴직금으로 채워진 IRP는 추가 납입 여력이 제한될 수 있습니다.</div>",
+            unsafe_allow_html=True,
+        )
+    with cols_n[2]:
+        st.markdown(
+            "<div style='background:rgba(255,255,255,0.03);border-left:4px solid #87CEEB;"
+            "padding:10px 14px;border-radius:0 8px 8px 0;font-size:0.83rem;line-height:1.7;'>"
+            "<b style='color:#87CEEB;'>과세표준 증가</b><br>"
+            "재투자로 수량이 늘면 분배금과 과세표준도 증가합니다."
+            " 연금소득 1,500만원 한도(개인납입·연금저축 원천)를 과세관리 탭에서 함께 모니터링하세요.</div>",
+            unsafe_allow_html=True,
+        )
+
+
+# ════════════════════════════════════════════════════════
+# ♻️ 재투자 시뮬레이터 탭 호출
+# ════════════════════════════════════════════════════════
+with _main_tab9:
+    _render_reinvest_tab(
+        pension_items={
+            "IRP":    _pension_irp_items,
+            "ISA":    _pension_isa_items,
+            "일반":   _pension_gen_items,
+            "연금저축": _pension_ps_items,
+        },
+        irp_income=irp_income,
+        isa_income=isa_income,
+        ps_income=ps_income,
+        gen_income=_gen_monthly_income,
+        irp_total=irp_total,
+        isa_total=isa_total,
+        ps_total=ps_total,
+        target_monthly=target_monthly,
+        sc_df=sc_df,
+        sc_names=sc_names,
+    )
+
+# ════════════════════════════════════════════════════════
 # 🏦 과세 관리 탭
 # ════════════════════════════════════════════════════════
 with _main_tab8:
     from pension_tax_monitor import render_tax_monitor_tab
     _tax_ctx = {
-        "dist_df":        dist_tax_df,
-        "year":           datetime.now().year,
-        "current_month":  datetime.now().month,
-        "irp_monthly":    irp_income,
-        "isa_monthly":    isa_income,
-        "gen_monthly":    _gen_monthly_income,
-        "ps_monthly":     ps_income,
+        "dist_df":       dist_tax_df,
+        "year":          datetime.now().year,
+        "current_month": datetime.now().month,
+        "irp_monthly":   irp_income,
+        "isa_monthly":   isa_income,
+        "gen_monthly":   _gen_monthly_income,
+        "ps_monthly":    ps_income,
         "target_monthly": target_monthly,
-        # ★ 시나리오 연동: 원본 sc_df(_sc_df_original) 사용 — 루프 변수 오염 방지
-        "sc_df":      _sc_df_original if "_sc_df_original" in dir() else pd.DataFrame(),
-        "sc_names":   sc_names  if "sc_names"  in dir() else [],
-        "sc_choice":  sc_choice if "sc_choice" in dir() else "",
-        "sc_applied": _sc_applied,   # 시나리오 모드 여부
     }
     render_tax_monitor_tab(_tax_ctx)

@@ -1002,19 +1002,19 @@ def _render_holdings_tab(
     disp_df = pd.DataFrame(rows)
 
     # ══════════════════════════════════════════════════════
-    # 1. 계좌별 요약 카드 (상단)
+    # 1-A. 전체 합계 카드 (1행)
     # ══════════════════════════════════════════════════════
     _total_eval = disp_df["평가금액"].sum()
     _total_buy  = disp_df["매입금액"].sum()
     _total_gain = disp_df["손익"].sum()
     _total_ret  = (_total_gain / _total_buy * 100) if _total_buy > 0 else 0
     _total_day  = disp_df["전일대비(원)"].sum()
-    _total_day_pct = (_total_day / (_total_eval - _total_day) * 100) if (_total_eval - _total_day) > 0 else 0
+    _total_day_pct = (
+        _total_day / (_total_eval - _total_day) * 100
+        if (_total_eval - _total_day) > 0 else 0
+    )
 
     c1, c2, c3, c4 = st.columns(4)
-    _ret_c = "#7dffb0" if _total_ret >= 0 else "#FF4B4B"
-    _day_c = "#7dffb0" if _total_day >= 0 else "#FF4B4B"
-
     c1.metric("계좌 평가액", f"{_total_eval:,.0f}원",
               delta=f"{_total_day:+,.0f}원 ({_total_day_pct:+.2f}%)",
               delta_color="normal" if _total_day >= 0 else "inverse")
@@ -1025,16 +1025,175 @@ def _render_holdings_tab(
               delta_color="normal" if _total_ret >= 0 else "inverse")
 
     # ══════════════════════════════════════════════════════
-    # 2. 보유종목 테이블 (컬럼 소팅 지원 — st.dataframe 사용)
+    # 1-B. 계좌별 소계 카드 (2행 — IRP→연금저축→ISA→일반)
+    # ══════════════════════════════════════════════════════
+    _ACC_ORDER = ["IRP", "연금저축", "ISA", "일반"]
+    _ACC_COLOR = {
+        "IRP":    "#87CEEB",
+        "연금저축": "#FFD700",
+        "ISA":    "#7dffb0",
+        "일반":   "#AFA9EC",
+    }
+    _ACC_BG = {
+        "IRP":    "rgba(135,206,235,0.12)",
+        "연금저축": "rgba(255,215,0,0.10)",
+        "ISA":    "rgba(125,255,176,0.10)",
+        "일반":   "rgba(175,169,236,0.10)",
+    }
+
+    # 계좌별 소계 집계
+    _acc_grp = (
+        disp_df.groupby("계좌")
+        .agg(평가금액=("평가금액","sum"), 매입금액=("매입금액","sum"), 손익=("손익","sum"))
+        .reset_index()
+    )
+    _sorted_accs = sorted(
+        _acc_grp.to_dict("records"),
+        key=lambda r: _ACC_ORDER.index(r["계좌"]) if r["계좌"] in _ACC_ORDER else 99,
+    )
+
+    if _sorted_accs:
+        _acols = st.columns(len(_sorted_accs))
+        for _ai, _ar in enumerate(_sorted_accs):
+            _an = _ar["계좌"]
+            _ae, _ab, _ag = _ar["평가금액"], _ar["매입금액"], _ar["손익"]
+            _ar2 = (_ag / _ab * 100) if _ab > 0 else 0
+            _bc  = _ACC_COLOR.get(_an, "#AFA9EC")
+            _bg  = _ACC_BG.get(_an, "rgba(175,169,236,0.10)")
+            _gc  = "#7dffb0" if _ag >= 0 else "#FF4B4B"
+            with _acols[_ai]:
+                st.markdown(
+                    f"<div style='background:{_bg};border:1px solid rgba(255,255,255,0.08);"
+                    f"border-top:3px solid {_bc};border-radius:8px;"
+                    f"padding:10px 12px;margin-top:10px;'>"
+                    f"<div style='font-size:0.72rem;font-weight:700;color:{_bc};"
+                    f"margin-bottom:6px;'>{_an}</div>"
+                    f"<div style='font-size:0.78rem;color:rgba(255,255,255,0.45);"
+                    f"margin-bottom:1px;'>평가액</div>"
+                    f"<div style='font-size:0.92rem;font-weight:600;margin-bottom:3px;'>"
+                    f"{_ae:,.0f}원</div>"
+                    f"<div style='font-size:0.72rem;color:rgba(255,255,255,0.35);'>"
+                    f"매입 {_ab:,.0f}원</div>"
+                    f"<div style='font-size:0.80rem;color:{_gc};margin-top:4px;"
+                    f"font-weight:600;'>{_ag:+,.0f}원 ({_ar2:+.2f}%)</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+    # ══════════════════════════════════════════════════════
+    # 2-A. 계좌별 구분행 포함 HTML 테이블
+    #       IRP→연금저축→ISA→일반 고정 정렬
+    #       계좌 배지 컬럼 + 구분 헤더행(소계)
     # ══════════════════════════════════════════════════════
     st.divider()
 
-    tbl_cols = ["계좌","종목명","수량","매입단가","매입금액","현재가",
-                "평가금액","손익","전일대비(원)","전일대비(%)","누적수익률(%)",
-                "주당분배금","월분배금","분배율(%)"]
+    # 계좌 순서 고정 정렬
+    disp_df["_acc_ord"] = disp_df["계좌"].apply(
+        lambda x: _ACC_ORDER.index(x) if x in _ACC_ORDER else 99
+    )
+    disp_df = disp_df.sort_values(["_acc_ord", "종목명"]).drop(columns=["_acc_ord"])
 
-    # ── Styler: 손익 컬럼 색상 ───────────────────────────
-    _color_cols = ["손익","전일대비(원)","전일대비(%)","누적수익률(%)"]
+    _NUM_C = {"수량","매입단가","매입금액","현재가","평가금액",
+              "손익","전일대비(원)","전일대비(%)","누적수익률(%)",
+              "주당분배금","월분배금","분배율(%)"}
+    _CLR_C = {"손익","전일대비(원)","전일대비(%)","누적수익률(%)"}
+
+    def _cv(v, col):
+        if col in _CLR_C and isinstance(v, (int, float)):
+            if v > 0: return "color:#FF4B4B;font-weight:600"
+            if v < 0: return "color:#4B9EFF;font-weight:600"
+        return ""
+
+    def _fv(v, col):
+        if not isinstance(v, (int, float)):
+            return str(v)
+        if col in ("손익","전일대비(원)"):          return f"{v:+,.0f}"
+        if col in ("전일대비(%)","누적수익률(%)","분배율(%)"): return f"{v:+.2f}%"
+        if col in ("수량","매입단가","매입금액","현재가","평가금액","주당분배금","월분배금"):
+            return f"{v:,.0f}"
+        return str(v)
+
+    _COLS  = ["계좌","종목명","수량","매입단가","매입금액","현재가",
+              "평가금액","손익","전일대비(원)","전일대비(%)","누적수익률(%)",
+              "주당분배금","월분배금","분배율(%)"]
+    _HEADS = ["계좌","종목명","수량","매입단가","매입금액","현재가",
+              "평가금액","손익","전일대비(원)","전일대비(%)","수익률(%)",
+              "주당분배금","월분배금","분배율(%)"]
+
+    _TH  = ("background:rgba(255,255,255,0.06);padding:7px 10px;"
+            "font-size:0.75rem;font-weight:600;color:rgba(255,255,255,0.5);"
+            "border-bottom:1px solid rgba(255,255,255,0.1);white-space:nowrap;")
+    _TR  = "border-bottom:0.5px solid rgba(255,255,255,0.06);"
+    _SEP = ("background:rgba(255,255,255,0.03);padding:5px 10px;"
+            "font-size:0.74rem;color:rgba(255,255,255,0.5);"
+            "border-bottom:1px solid rgba(255,255,255,0.18);")
+
+    _rows_html = []
+    _prev_acc  = None
+    for _, _row in disp_df.iterrows():
+        _acc = str(_row.get("계좌", ""))
+
+        # 계좌 구분 헤더행 삽입
+        if _acc != _prev_acc:
+            _rg = _acc_grp[_acc_grp["계좌"] == _acc]
+            if not _rg.empty:
+                _ge = int(_rg["평가금액"].iloc[0])
+                _gb = int(_rg["매입금액"].iloc[0])
+                _gg = int(_rg["손익"].iloc[0])
+                _gr = (_gg / _gb * 100) if _gb > 0 else 0
+                _gc2 = "#7dffb0" if _gg >= 0 else "#FF4B4B"
+                _bc2 = _ACC_COLOR.get(_acc, "#AFA9EC")
+                _bg2 = _ACC_BG.get(_acc, "rgba(175,169,236,0.10)")
+                _rows_html.append(
+                    f'<tr><td colspan="{len(_COLS)}" style="{_SEP}">'
+                    f'<span style="font-size:0.70rem;font-weight:700;padding:2px 8px;'
+                    f'border-radius:4px;background:{_bg2};color:{_bc2};">{_acc}</span>'
+                    f'&nbsp;&nbsp;평가 {_ge:,.0f}원&nbsp;·&nbsp;매입 {_gb:,.0f}원&nbsp;·&nbsp;'
+                    f'손익 <span style="color:{_gc2};font-weight:600;">'
+                    f'{_gg:+,.0f}원 ({_gr:+.2f}%)</span>'
+                    f'</td></tr>'
+                )
+            _prev_acc = _acc
+
+        # 종목 행
+        cells = []
+        for col in _COLS:
+            v  = _row.get(col, "")
+            al = "right" if col in _NUM_C else "left"
+            td = f"padding:6px 10px;font-size:0.82rem;text-align:{al};white-space:nowrap;"
+            if col == "계좌":
+                _bc3 = _ACC_COLOR.get(_acc, "#AFA9EC")
+                _bg3 = _ACC_BG.get(_acc, "rgba(175,169,236,0.10)")
+                cells.append(
+                    f'<td style="{td}">'
+                    f'<span style="font-size:0.69rem;font-weight:700;padding:2px 7px;'
+                    f'border-radius:4px;background:{_bg3};color:{_bc3};">{_acc}</span>'
+                    f'</td>'
+                )
+            else:
+                cells.append(f'<td style="{td}{_cv(v, col)}">{_fv(v, col)}</td>')
+        _rows_html.append(f'<tr style="{_TR}">{"".join(cells)}</tr>')
+
+    _hdr_html = "".join(
+        f'<th style="{_TH}text-align:{"right" if h in _NUM_C else "left"}">{h}</th>'
+        for h in _HEADS
+    )
+    st.markdown(
+        f'<div style="overflow-x:auto;border:1px solid rgba(255,255,255,0.1);'
+        f'border-radius:8px;margin-bottom:12px;">'
+        f'<table style="width:100%;border-collapse:collapse;">'
+        f'<thead><tr>{_hdr_html}</tr></thead>'
+        f'<tbody>{"".join(_rows_html)}</tbody>'
+        f'</table></div>',
+        unsafe_allow_html=True,
+    )
+
+    # ══════════════════════════════════════════════════════
+    # 2-B. 소팅 가능한 st.dataframe (컬럼 헤더 클릭 정렬)
+    # ══════════════════════════════════════════════════════
+    st.caption("💡 아래 테이블은 컬럼 헤더 클릭으로 오름/내림차순 정렬이 가능합니다.")
+
+    _color_cols = list(_CLR_C)
 
     def _style_pnl(df):
         styles = pd.DataFrame("", index=df.index, columns=df.columns)
@@ -1042,9 +1201,9 @@ def _render_holdings_tab(
             if col in df.columns:
                 styles[col] = df[col].apply(
                     lambda v: "color: #FF4B4B; font-weight:600"
-                    if isinstance(v,(int,float)) and v > 0
+                    if isinstance(v, (int, float)) and v > 0
                     else ("color: #4B9EFF; font-weight:600"
-                          if isinstance(v,(int,float)) and v < 0
+                          if isinstance(v, (int, float)) and v < 0
                           else "color: rgba(255,255,255,0.4)")
                 )
         return styles
@@ -1060,32 +1219,31 @@ def _render_holdings_tab(
                 fmt[col] = lambda v: f"{v:,.0f}" if isinstance(v,(int,float)) else v
         return fmt
 
+    tbl_cols = list(_COLS)
     _styled = (
         disp_df[tbl_cols]
         .style
         .apply(_style_pnl, axis=None)
         .format(_fmt(disp_df[tbl_cols]))
     )
-
-    st.caption("💡 컬럼 헤더를 클릭하면 오름/내림차순 정렬이 가능합니다.")
     st.dataframe(
         _styled,
         hide_index=True,
         use_container_width=True,
         column_config={
-            "계좌":       st.column_config.TextColumn("계좌", width="small"),
-            "수량":       st.column_config.NumberColumn("수량",     format="%,.0f"),
-            "매입단가":   st.column_config.NumberColumn("매입단가", format="%,.0f"),
-            "매입금액":   st.column_config.NumberColumn("매입금액", format="%,.0f"),
-            "현재가":     st.column_config.NumberColumn("현재가",   format="%,.0f"),
-            "평가금액":   st.column_config.NumberColumn("평가금액", format="%,.0f"),
-            "손익":       st.column_config.NumberColumn("손익",     format="%+,.0f"),
-            "전일대비(원)": st.column_config.NumberColumn("전일대비(원)", format="%+,.0f"),
-            "전일대비(%)": st.column_config.NumberColumn("전일대비(%)",  format="%+.2f%%"),
-            "누적수익률(%)": st.column_config.NumberColumn("수익률(%)",  format="%+.2f%%"),
-            "주당분배금": st.column_config.NumberColumn("주당분배금", format="%,.0f"),
-            "월분배금":   st.column_config.NumberColumn("월분배금",  format="%,.0f"),
-            "분배율(%)":  st.column_config.NumberColumn("분배율(%)", format="%.2f%%"),
+            "계좌":          st.column_config.TextColumn("계좌",      width="small"),
+            "수량":          st.column_config.NumberColumn("수량",     format="%,.0f"),
+            "매입단가":      st.column_config.NumberColumn("매입단가", format="%,.0f"),
+            "매입금액":      st.column_config.NumberColumn("매입금액", format="%,.0f"),
+            "현재가":        st.column_config.NumberColumn("현재가",   format="%,.0f"),
+            "평가금액":      st.column_config.NumberColumn("평가금액", format="%,.0f"),
+            "손익":          st.column_config.NumberColumn("손익",     format="%+,.0f"),
+            "전일대비(원)":  st.column_config.NumberColumn("전일대비(원)", format="%+,.0f"),
+            "전일대비(%)":   st.column_config.NumberColumn("전일대비(%)",  format="%+.2f%%"),
+            "누적수익률(%)": st.column_config.NumberColumn("수익률(%)",    format="%+.2f%%"),
+            "주당분배금":    st.column_config.NumberColumn("주당분배금", format="%,.0f"),
+            "월분배금":      st.column_config.NumberColumn("월분배금",  format="%,.0f"),
+            "분배율(%)":     st.column_config.NumberColumn("분배율(%)", format="%.2f%%"),
         },
     )
 

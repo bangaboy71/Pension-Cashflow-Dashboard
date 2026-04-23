@@ -1751,10 +1751,12 @@ def _render_watchlist_tab(
         st.session_state["wl_tbl_stock"] = _tbl_selected
         st.caption(f"🔍 **{_tbl_selected}** 선택됨")
 
-    # 계좌별 월분배금 합계 요약
+    # 계좌별 월분배금 합계 요약 — 계좌 컬럼 없을 시 방어 처리
+    if "계좌" not in wl_df.columns:
+        wl_df["계좌"] = "기타"
     acc_sum      = wl_df.groupby("계좌")["세후분배금"].sum()
     total_wl_net = wl_df["세후분배금"].sum()
-    total_eval   = wl_df["평가액_실시간"].sum()
+    total_eval   = wl_df["평가액_실시간"].sum() if "평가액_실시간" in wl_df.columns else 0.0
 
     _sm_cols = st.columns(len(acc_sum) + 2)
     for i, (acc, val) in enumerate(acc_sum.items()):

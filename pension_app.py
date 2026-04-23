@@ -663,101 +663,16 @@ def _fetch_usd_krw() -> float:
         return 1380.0
 
 
-def _krx_to_naver_code(code: str) -> str:
-    """
-    KRX/Yahoo 코드 → 네이버 증권 코드 변환.
-    네이버는 KRX 원본 코드를 그대로 사용 (혼합코드 포함).
-    예: 0018C0.KS → 0018C0, 489030.KS → 489030
-    미국 주식(SNDK 등 영문만) → "" (네이버 미지원)
-    """
-    base = str(code).strip().upper()
-    base = base.replace(".KS","").replace(".KQ","").replace(".KS","")
-    if not base or base in ("NAN","0",""):
-        return ""
-    # 순수 영문(미국 주식) → 네이버 미지원
-    if base.isalpha():
-        return ""
-    return base
-
-
-def _fetch_naver_price(naver_code: str) -> tuple[int, float, float]:
-    """
-    네이버 증권 polling API → (현재가, 전일대비%, 전일대비금액).
-    Yahoo 실패 종목(혼합코드 등)의 폴백 소스.
-    """
-    if not naver_code:
-        return 0, 0.0, 0.0
-    try:
-        import requests as _req
-        # polling API — 실시간 시세 JSON
-        url = (
-            f"https://polling.finance.naver.com/api/realtime"
-            f"/domestic/stock/{naver_code}"
-        )
-        res = _req.get(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Referer":    "https://finance.naver.com",
-            },
-            timeout=6,
-        )
-        if res.status_code != 200:
-            return 0, 0.0, 0.0
-
-        data  = res.json()
-        datas = data.get("datas", [])
-        if not datas:
-            return 0, 0.0, 0.0
-
-        d = datas[0]
-        # 현재가
-        now_p = int(str(d.get("closePrice","0")).replace(",","") or 0)
-        if now_p == 0:
-            return 0, 0.0, 0.0
-
-        # 전일대비
-        ctp    = d.get("compareToPreviousPrice", {})
-        chg_pct_str = str(ctp.get("fluctuationsRatio","0")).replace(",","").replace("%","")
-        chg_amt_str = str(ctp.get("diff","0")).replace(",","").replace("+","").replace("-","")
-        try:
-            raw_pct = float(chg_pct_str)
-            raw_amt = int(chg_amt_str)
-        except ValueError:
-            raw_pct, raw_amt = 0.0, 0
-
-        # 등락 부호 처리 (codeType 또는 fluctuationType으로 판단)
-        sign_key = str(ctp.get("code","") or ctp.get("fluctuationType","")).upper()
-        # "2"=상승, "5"=하락, "3"=보합 (네이버 코드)
-        if sign_key in ("5","LOWER","하락"):
-            raw_pct = -abs(raw_pct)
-            raw_amt = -abs(raw_amt)
-        else:
-            raw_pct = abs(raw_pct)
-            raw_amt = abs(raw_amt)
-
-        return now_p, round(raw_pct, 2), raw_amt
-
-    except Exception:
-        return 0, 0.0, 0.0
-
-
 def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
     """
     종목코드 → (현재가(원), 전일대비%, 전일대비금액) 반환.
-
-    조회 순서:
-      1. Yahoo Finance (KRX 순수숫자 코드 / 미국 주식)
-         - USD 종목: USDKRW=X 환율로 자동 원화 환산
-      2. Yahoo 실패 시 → 네이버 증권 polling API 폴백
-         (KRX 혼합코드 0018C0, 0177R0 등 Yahoo 미등록 종목 지원)
+    - KRX 종목 (.KS/.KQ): 원화 그대로
+    - 미국 주식 (SNDK, PLTR 등): USD 조회 후 USDKRW=X 환율로 원화 환산
+    직전 거래일 종가는 5d OHLC quote.close 배열 기준.
     """
     ycode = _normalize_code(code)
     if not ycode:
         return 0, 0.0, 0.0
-
-    # ── 1. Yahoo Finance 시도 ────────────────────────────
-    yahoo_result = (0, 0.0, 0.0)
     try:
         import requests as _req
         import datetime as _dt
@@ -772,51 +687,44 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
         meta   = result["meta"]
 
         now_p_raw = float(meta.get("regularMarketPrice", 0))
-        if now_p_raw > 0:
-            # 통화 감지 → USD면 원화 환산
-            currency = str(meta.get("currency", "KRW")).upper()
-            fx = _fetch_usd_krw() if currency == "USD" else 1.0
-            now_p = int(round(now_p_raw * fx))
+        if now_p_raw == 0:
+            return 0, 0.0, 0.0
 
-            # 직전 거래일 종가
-            now_kst = _dt.datetime.utcnow() + _dt.timedelta(hours=9)
-            today_start_utc = int(
-                _dt.datetime(now_kst.year, now_kst.month, now_kst.day)
-                .replace(tzinfo=_dt.timezone.utc).timestamp()
-            ) - 9 * 3600
+        # 통화 감지 → USD면 원화 환산
+        currency = str(meta.get("currency", "KRW")).upper()
+        fx = _fetch_usd_krw() if currency == "USD" else 1.0
 
-            ts_list  = result.get("timestamp", [])
-            cls_list = result["indicators"]["quote"][0].get("close", [])
+        now_p = int(round(now_p_raw * fx))
 
-            prev_p_raw = 0.0
-            for ts, cl in zip(reversed(ts_list), reversed(cls_list)):
-                if cl is None or cl <= 0: continue
-                if ts < today_start_utc:
-                    prev_p_raw = cl; break
-            if prev_p_raw == 0:
-                valid = [(t,cl) for t,cl in zip(ts_list,cls_list) if cl and cl>0]
-                if len(valid) >= 2:
-                    prev_p_raw = valid[-2][1]
-            if prev_p_raw == 0:
-                prev_p_raw = now_p_raw
+        # 직전 거래일 종가
+        now_kst = _dt.datetime.utcnow() + _dt.timedelta(hours=9)
+        today_start_utc = int(
+            _dt.datetime(now_kst.year, now_kst.month, now_kst.day)
+            .replace(tzinfo=_dt.timezone.utc).timestamp()
+        ) - 9 * 3600
 
-            prev_p  = int(round(prev_p_raw * fx))
-            chg_amt = now_p - prev_p
-            chg_pct = (chg_amt / prev_p * 100) if prev_p > 0 else 0.0
-            yahoo_result = (now_p, round(chg_pct, 2), chg_amt)
+        ts_list  = result.get("timestamp", [])
+        cls_list = result["indicators"]["quote"][0].get("close", [])
+
+        prev_p_raw = 0.0
+        for ts, cl in zip(reversed(ts_list), reversed(cls_list)):
+            if cl is None or cl <= 0: continue
+            if ts < today_start_utc:
+                prev_p_raw = cl; break
+
+        if prev_p_raw == 0:
+            valid = [(t,cl) for t,cl in zip(ts_list,cls_list) if cl and cl>0]
+            if len(valid) >= 2:
+                prev_p_raw = valid[-2][1]
+        if prev_p_raw == 0:
+            prev_p_raw = now_p_raw
+
+        prev_p  = int(round(prev_p_raw * fx))
+        chg_amt = now_p - prev_p
+        chg_pct = (chg_amt / prev_p * 100) if prev_p > 0 else 0.0
+        return now_p, round(chg_pct, 2), chg_amt
     except Exception:
-        pass
-
-    if yahoo_result[0] > 0:
-        return yahoo_result
-
-    # ── 2. Yahoo 실패 → 네이버 증권 폴백 ────────────────
-    # 미국 주식(순수 영문 티커)은 네이버 미지원이므로 건너뜀
-    naver_code = _krx_to_naver_code(ycode)
-    if naver_code:
-        return _fetch_naver_price(naver_code)
-
-    return 0, 0.0, 0.0
+        return 0, 0.0, 0.0
 
 
 @st.cache_data(ttl="3m", show_spinner=False)
@@ -2200,11 +2108,14 @@ def calc_after_tax(
     irp_pension_year: int = 1,
     irp_personal_ratio: float = 0.0,   # 개인납입금+운용수익 비율 (0~1)
     age: int = 55,                      # 수령 시점 나이 (연금소득세율 결정)
+    pub_taxable_ratio: float = 1.0,    # 공무원연금 과세비율 (2002년 이후 납부분 비율)
 ) -> dict:
     """
     세목별 공제 후 실수령액 계산 (소득세법 정확 적용).
 
     공적연금 (공무원연금)
+    ─ pub_taxable_ratio: 2002년 이전 납부분 비과세(소득세법 §12①)
+      → 과세대상 = 연금월액 × pub_taxable_ratio
     ─ 연금소득공제(소득세법 §47의2) → 과세표준 → 기본세율(§55)
     ─ 지방소득세 10% 가산
     ─ 건강보험료: 연금소득 × 7.09% (지역가입자, 장기요양 포함)
@@ -2222,21 +2133,23 @@ def calc_after_tax(
     ─ 연 200만원 비과세 한도 내: 세금 0
     ─ 초과분: 9.9% 분리과세
 
-    검증: 세전 3,831,570원 → 세후 3,624,210원 (공무원연금공단 기준)
+    검증: 세전 3,896,740원, 과세비율 93.13% → 세금 216,270원 (공무원연금공단 기준)
     """
-    # ── 공적연금: 연간 기준 정확 계산 (소득세법 기준) ──
-    annual_pub   = public_pension * 12
-    deduction    = _pension_income_deduction(annual_pub)
-    taxable      = max(0.0, annual_pub - deduction)
-    income_tax_a = _income_tax_rate(taxable)
+    # ── 공적연금: 과세비율 적용 후 소득세법 기준 계산 ──
+    # pub_taxable_ratio: 2002년 이후 납부분 비율 (기본 100%)
+    _taxable_pension  = public_pension * max(0.0, min(1.0, pub_taxable_ratio))
+    annual_pub        = _taxable_pension * 12
+    deduction         = _pension_income_deduction(annual_pub)
+    taxable           = max(0.0, annual_pub - deduction)
+    income_tax_a      = _income_tax_rate(taxable)
     # 연금소득 세액공제 (소득세법 §59의3): 연 900,000원 한도
     PENSION_TAX_CREDIT = 900_000
-    income_tax_a = max(0.0, income_tax_a - PENSION_TAX_CREDIT)
-    local_tax_a  = income_tax_a * 0.10        # 지방소득세 10%
-    pub_tax      = (income_tax_a + local_tax_a) / 12   # 월 환산
-    # 건강보험료: 지역가입자 별도 고지 방식이지만 앱에서 선택 가능하도록 유지
-    pub_health   = public_pension * HEALTH_INS_RATE
-    pub_net      = public_pension - pub_tax - pub_health
+    income_tax_a  = max(0.0, income_tax_a - PENSION_TAX_CREDIT)
+    local_tax_a   = income_tax_a * 0.10        # 지방소득세 10%
+    pub_tax       = (income_tax_a + local_tax_a) / 12   # 월 환산
+    # 건강보험료: 실제 연금월액 기준 (과세비율 무관)
+    pub_health    = public_pension * HEALTH_INS_RATE
+    pub_net       = public_pension - pub_tax - pub_health
 
     # ── IRP (퇴직금 + 개인납입금 원천별 분리 과세) ────────
     _irp_yr       = max(1, min(irp_pension_year, 10))
@@ -3321,6 +3234,52 @@ with st.sidebar:
     show_tax       = st.toggle("세후 실수령액 표시",  value=True)
     use_health_ins = False  # 건강보험료는 생활비에 포함 → 세후 계산에서 제외
 
+    # 공무원연금 과세비율 설정
+    # 소득세법 §12①: 2002년 이전 납부분은 비과세, 이후 납부분만 과세
+    # 공무원연금공단이 적용하는 비율 = 2002년 이후 납부월수 / 전체 납부월수
+    with st.expander("📋 공무원연금 과세비율 설정", expanded=False):
+        st.caption(
+            "공무원연금공단은 2002년 이전·이후 납부기간 비율에 따라 "
+            "연금액 일부만 과세소득으로 처리합니다. "
+            "공단 지급내역서의 실제 세금을 기준으로 조정하세요."
+        )
+        _pub_taxable_pct = st.slider(
+            "과세 대상 비율 (%)",
+            min_value=0, max_value=100,
+            value=int(st.session_state.get("pub_taxable_pct", 93)),
+            step=1,
+            key="pub_taxable_pct",
+            help=(
+                "연금월액 중 과세소득으로 인정되는 비율.\n"
+                "• 2002년 이전 입직: 낮을수록 세금 감소\n"
+                "• 2002년 이후 입직: 100% 적용\n"
+                "공단 지급내역서의 소득세 역산으로 확인 가능"
+            ),
+        )
+        _pub_taxable_ratio = _pub_taxable_pct / 100.0
+        # 현재 연금월액 기준 예상 세금 실시간 표시
+        _pub_monthly_preview = float(_vals.get("public_pension", 0) or 0) if "_vals" in dir() else 0.0
+        if _pub_monthly_preview > 0:
+            _prev_annual     = _pub_monthly_preview * 12 * _pub_taxable_ratio
+            _prev_deduct     = (
+                13_420_000 if _prev_annual > 35_000_000
+                else 12_420_000 + (_prev_annual - 25_000_000) * 0.10 if _prev_annual > 25_000_000
+                else 10_220_000 + (_prev_annual - 14_000_000) * 0.20 if _prev_annual > 14_000_000
+                else 7_700_000 + (_prev_annual - 7_700_000) * 0.40   if _prev_annual > 7_700_000
+                else _prev_annual
+            )
+            _prev_taxable    = max(0.0, _prev_annual - _prev_deduct)
+            _prev_tax_b4     = (
+                840_000 + (_prev_taxable - 14_000_000) * 0.15 if _prev_taxable > 14_000_000
+                else _prev_taxable * 0.06
+            )
+            _prev_tax        = max(0.0, _prev_tax_b4 - 900_000)
+            _prev_monthly    = (_prev_tax * 1.1) / 12
+            st.caption(
+                f"예상 월 소득세(지방세 포함): **{_prev_monthly:,.0f}원** "
+                f"(연금월액 {_pub_monthly_preview:,.0f}원 기준)"
+            )
+
     # ── 시나리오 선택 ─────────────────────────────────
     st.divider()
     if st.button("🔄 실시간 데이터 전체 갱신",
@@ -3505,6 +3464,7 @@ total_income = public_pension + irp_income + ps_income + isa_income + _gen_month
 # ════════════════════════════════════════════════════════
 _irp_pension_yr = int(st.session_state.get("irp_pension_year", 1))
 _current_age    = datetime.now().year - 1971  # birth_year 고정값
+_pub_taxable_r  = float(st.session_state.get("pub_taxable_pct", 93)) / 100.0
 
 # ── ① 원천비율 결정 (우선순위: 시나리오 > 시트자동 > 슬라이더) ──
 if _sc_applied and "_sc" in dir():
@@ -3565,6 +3525,7 @@ tax_result = calc_after_tax(
     irp_pension_year=_irp_pension_yr,
     irp_personal_ratio=_irp_personal_r,
     age=_current_age,
+    pub_taxable_ratio=_pub_taxable_r,
 )
 
 # ── ④ 과세표준 기반 IRP 세금 보정 (시트 데이터 있을 때만) ──────

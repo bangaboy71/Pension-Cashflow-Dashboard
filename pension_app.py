@@ -663,16 +663,101 @@ def _fetch_usd_krw() -> float:
         return 1380.0
 
 
+def _krx_to_naver_code(code: str) -> str:
+    """
+    KRX/Yahoo 코드 → 네이버 증권 코드 변환.
+    네이버는 KRX 원본 코드를 그대로 사용 (혼합코드 포함).
+    예: 0018C0.KS → 0018C0, 489030.KS → 489030
+    미국 주식(SNDK 등 영문만) → "" (네이버 미지원)
+    """
+    base = str(code).strip().upper()
+    base = base.replace(".KS","").replace(".KQ","").replace(".KS","")
+    if not base or base in ("NAN","0",""):
+        return ""
+    # 순수 영문(미국 주식) → 네이버 미지원
+    if base.isalpha():
+        return ""
+    return base
+
+
+def _fetch_naver_price(naver_code: str) -> tuple[int, float, float]:
+    """
+    네이버 증권 polling API → (현재가, 전일대비%, 전일대비금액).
+    Yahoo 실패 종목(혼합코드 등)의 폴백 소스.
+    """
+    if not naver_code:
+        return 0, 0.0, 0.0
+    try:
+        import requests as _req
+        # polling API — 실시간 시세 JSON
+        url = (
+            f"https://polling.finance.naver.com/api/realtime"
+            f"/domestic/stock/{naver_code}"
+        )
+        res = _req.get(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer":    "https://finance.naver.com",
+            },
+            timeout=6,
+        )
+        if res.status_code != 200:
+            return 0, 0.0, 0.0
+
+        data  = res.json()
+        datas = data.get("datas", [])
+        if not datas:
+            return 0, 0.0, 0.0
+
+        d = datas[0]
+        # 현재가
+        now_p = int(str(d.get("closePrice","0")).replace(",","") or 0)
+        if now_p == 0:
+            return 0, 0.0, 0.0
+
+        # 전일대비
+        ctp    = d.get("compareToPreviousPrice", {})
+        chg_pct_str = str(ctp.get("fluctuationsRatio","0")).replace(",","").replace("%","")
+        chg_amt_str = str(ctp.get("diff","0")).replace(",","").replace("+","").replace("-","")
+        try:
+            raw_pct = float(chg_pct_str)
+            raw_amt = int(chg_amt_str)
+        except ValueError:
+            raw_pct, raw_amt = 0.0, 0
+
+        # 등락 부호 처리 (codeType 또는 fluctuationType으로 판단)
+        sign_key = str(ctp.get("code","") or ctp.get("fluctuationType","")).upper()
+        # "2"=상승, "5"=하락, "3"=보합 (네이버 코드)
+        if sign_key in ("5","LOWER","하락"):
+            raw_pct = -abs(raw_pct)
+            raw_amt = -abs(raw_amt)
+        else:
+            raw_pct = abs(raw_pct)
+            raw_amt = abs(raw_amt)
+
+        return now_p, round(raw_pct, 2), raw_amt
+
+    except Exception:
+        return 0, 0.0, 0.0
+
+
 def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
     """
     종목코드 → (현재가(원), 전일대비%, 전일대비금액) 반환.
-    - KRX 종목 (.KS/.KQ): 원화 그대로
-    - 미국 주식 (SNDK, PLTR 등): USD 조회 후 USDKRW=X 환율로 원화 환산
-    직전 거래일 종가는 5d OHLC quote.close 배열 기준.
+
+    조회 순서:
+      1. Yahoo Finance (KRX 순수숫자 코드 / 미국 주식)
+         - USD 종목: USDKRW=X 환율로 자동 원화 환산
+      2. Yahoo 실패 시 → 네이버 증권 polling API 폴백
+         (KRX 혼합코드 0018C0, 0177R0 등 Yahoo 미등록 종목 지원)
     """
     ycode = _normalize_code(code)
     if not ycode:
         return 0, 0.0, 0.0
+
+    # ── 1. Yahoo Finance 시도 ────────────────────────────
+    yahoo_result = (0, 0.0, 0.0)
     try:
         import requests as _req
         import datetime as _dt
@@ -687,44 +772,51 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
         meta   = result["meta"]
 
         now_p_raw = float(meta.get("regularMarketPrice", 0))
-        if now_p_raw == 0:
-            return 0, 0.0, 0.0
+        if now_p_raw > 0:
+            # 통화 감지 → USD면 원화 환산
+            currency = str(meta.get("currency", "KRW")).upper()
+            fx = _fetch_usd_krw() if currency == "USD" else 1.0
+            now_p = int(round(now_p_raw * fx))
 
-        # 통화 감지 → USD면 원화 환산
-        currency = str(meta.get("currency", "KRW")).upper()
-        fx = _fetch_usd_krw() if currency == "USD" else 1.0
+            # 직전 거래일 종가
+            now_kst = _dt.datetime.utcnow() + _dt.timedelta(hours=9)
+            today_start_utc = int(
+                _dt.datetime(now_kst.year, now_kst.month, now_kst.day)
+                .replace(tzinfo=_dt.timezone.utc).timestamp()
+            ) - 9 * 3600
 
-        now_p = int(round(now_p_raw * fx))
+            ts_list  = result.get("timestamp", [])
+            cls_list = result["indicators"]["quote"][0].get("close", [])
 
-        # 직전 거래일 종가
-        now_kst = _dt.datetime.utcnow() + _dt.timedelta(hours=9)
-        today_start_utc = int(
-            _dt.datetime(now_kst.year, now_kst.month, now_kst.day)
-            .replace(tzinfo=_dt.timezone.utc).timestamp()
-        ) - 9 * 3600
+            prev_p_raw = 0.0
+            for ts, cl in zip(reversed(ts_list), reversed(cls_list)):
+                if cl is None or cl <= 0: continue
+                if ts < today_start_utc:
+                    prev_p_raw = cl; break
+            if prev_p_raw == 0:
+                valid = [(t,cl) for t,cl in zip(ts_list,cls_list) if cl and cl>0]
+                if len(valid) >= 2:
+                    prev_p_raw = valid[-2][1]
+            if prev_p_raw == 0:
+                prev_p_raw = now_p_raw
 
-        ts_list  = result.get("timestamp", [])
-        cls_list = result["indicators"]["quote"][0].get("close", [])
-
-        prev_p_raw = 0.0
-        for ts, cl in zip(reversed(ts_list), reversed(cls_list)):
-            if cl is None or cl <= 0: continue
-            if ts < today_start_utc:
-                prev_p_raw = cl; break
-
-        if prev_p_raw == 0:
-            valid = [(t,cl) for t,cl in zip(ts_list,cls_list) if cl and cl>0]
-            if len(valid) >= 2:
-                prev_p_raw = valid[-2][1]
-        if prev_p_raw == 0:
-            prev_p_raw = now_p_raw
-
-        prev_p  = int(round(prev_p_raw * fx))
-        chg_amt = now_p - prev_p
-        chg_pct = (chg_amt / prev_p * 100) if prev_p > 0 else 0.0
-        return now_p, round(chg_pct, 2), chg_amt
+            prev_p  = int(round(prev_p_raw * fx))
+            chg_amt = now_p - prev_p
+            chg_pct = (chg_amt / prev_p * 100) if prev_p > 0 else 0.0
+            yahoo_result = (now_p, round(chg_pct, 2), chg_amt)
     except Exception:
-        return 0, 0.0, 0.0
+        pass
+
+    if yahoo_result[0] > 0:
+        return yahoo_result
+
+    # ── 2. Yahoo 실패 → 네이버 증권 폴백 ────────────────
+    # 미국 주식(순수 영문 티커)은 네이버 미지원이므로 건너뜀
+    naver_code = _krx_to_naver_code(ycode)
+    if naver_code:
+        return _fetch_naver_price(naver_code)
+
+    return 0, 0.0, 0.0
 
 
 @st.cache_data(ttl="3m", show_spinner=False)
@@ -3557,12 +3649,11 @@ if sc_choice != "기본 시트 현황" and sc_names:
     )
 
 # ── 메인 탭 ──────────────────────────────────────────
-_main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5, _main_tab6, _main_tab7, _main_tab8, _main_tab9 = st.tabs([
+_main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5, _main_tab6, _main_tab7, _main_tab8 = st.tabs([
     "📊 현금흐름 대시보드", "📒 월별 가계부",
     "📈 보유종목", "🔍 관심종목",
     "📐 수익률 벤치마크", "🎲 Monte Carlo",
     "🤖 AI 자문", "🏦 과세관리",
-    "♻️ 재투자 시뮬레이터",
 ])
 
 with _main_tab2:
@@ -5410,361 +5501,3 @@ with _main_tab8:
         "target_monthly": target_monthly,
     }
     render_tax_monitor_tab(_tax_ctx)
-
-
-# ════════════════════════════════════════════════════════
-# ♻️ 재투자 시뮬레이터 탭
-# ════════════════════════════════════════════════════════
-def _render_reinvest_tab(
-    pension_items: dict,
-    irp_income: float,
-    isa_income: float,
-    ps_income: float,
-    gen_income: float,
-    irp_total: float,
-    isa_total: float,
-    ps_total: float,
-    target_monthly: float,
-    sc_df,
-    sc_names: list,
-):
-    """♻️ 재투자 시뮬레이터"""
-    import plotly.graph_objects as _go
-
-    st.markdown(
-        "<h3 style='margin-bottom:0.2rem;'>♻️ 재투자 시뮬레이터</h3>"
-        "<p style='color:rgba(255,255,255,0.5);font-size:0.83rem;margin-top:0;'>"
-        "종목별 배분%의 합계가 재투자 비율입니다. "
-        "예: SOL 10% + TIGER 5% → 월 분배금의 15% 재투자, 85% 실수령</p>",
-        unsafe_allow_html=True,
-    )
-
-    # ── 보유 종목 수집 ────────────────────────────────────────
-    all_items = []
-    for acc, items in pension_items.items():
-        for it in items:
-            nm    = str(it.get("종목명","")).strip()
-            qty   = float(it.get("수량",  0) or 0)
-            dps   = float(it.get("주당분배금", 0) or 0)
-            price = float(it.get("현재가", 0) or 0)
-            amt   = float(it.get("원금",  0) or 0)
-            rate  = float(it.get("분배율(%)", 0) or 0)
-            memo  = str(it.get("메모","")).strip()
-            if not nm or nm in ("nan","") or qty == 0:
-                continue
-            if price == 0 and amt > 0 and qty > 0:
-                price = amt / qty
-            src     = "개인납입" if any(k in memo for k in ["개인","납입"]) else "퇴직금"
-            monthly = qty * dps if dps > 0 else amt * rate / 100
-            all_items.append({
-                "nm": nm, "acc": acc, "qty": qty, "dps": dps,
-                "price": price, "amt": amt, "src": src, "monthly": monthly,
-            })
-
-    if not all_items:
-        st.info("연금현황 시트에 보유 종목(수량·주당분배금)을 입력하면 시뮬레이션이 활성화됩니다.")
-        return
-
-    base_monthly = irp_income + isa_income + ps_income + gen_income
-    base_asset   = sum(it["price"] * it["qty"] for it in all_items if it["price"] > 0)
-
-    # ── 파라미터 ─────────────────────────────────────────────
-    st.markdown("#### ⚙️ 시뮬레이션 파라미터")
-    p1, p2, p3 = st.columns(3)
-    sim_yr  = p1.slider("시뮬레이션 기간 (년)", 1, 15, 5, 1, key="ri_yr")
-    inf_pct = p2.slider("물가상승률 (%/년)", 0.0, 5.0, 2.0, 0.5, key="ri_inf")
-    ri_tgt  = p3.number_input("목표 생활비 (원/월)",
-                               value=int(target_monthly), step=100_000, key="ri_tgt")
-
-    # ── 종목별 배분% · 주가 상승률 설정 ──────────────────────
-    st.markdown("#### 📋 종목별 재투자 배분 및 주가 상승률 설정")
-    st.caption(
-        "배분% = 월 분배금 중 해당 종목 매수에 쓸 비율 (예: 10% → 월 분배금의 10%를 이 종목에 재투자) "
-        "· 배분% 합계가 자동으로 재투자 비율이 됩니다 · 상승률 = 연간 예측 주가 상승률"
-    )
-
-    ACC_COLORS = {
-        "IRP":    ("#87CEEB", "rgba(135,206,235,0.12)"),
-        "ISA":    ("#7dffb0", "rgba(125,255,176,0.12)"),
-        "연금저축": ("#FFD700", "rgba(255,215,0,0.10)"),
-        "일반":   ("#AFA9EC", "rgba(175,169,236,0.10)"),
-    }
-
-    hdr = st.columns([0.3, 2.8, 1.0, 0.8, 0.8, 0.8, 0.8])
-    for lbl, col in zip(["","종목명","계좌","현재가","배분%/월","상승률%/년","월분배금"], hdr):
-        col.markdown(
-            f"<div style='font-size:0.72rem;color:rgba(255,255,255,0.4);"
-            f"padding-bottom:4px;'>{lbl}</div>",
-            unsafe_allow_html=True,
-        )
-
-    item_configs = []
-    for i, it in enumerate(all_items):
-        bc, bg = ACC_COLORS.get(it["acc"], ("#AFA9EC","rgba(175,169,236,0.10)"))
-        cols = st.columns([0.3, 2.8, 1.0, 0.8, 0.8, 0.8, 0.8])
-        sel   = cols[0].checkbox("", value=(i < 4), key=f"ri_sel_{i}",
-                                 label_visibility="collapsed")
-        cols[1].markdown(
-            f"<div style='padding:4px 0;font-size:0.85rem;'>{it['nm'][:28]}</div>",
-            unsafe_allow_html=True)
-        cols[2].markdown(
-            f"<div style='padding:4px 0;font-size:0.75rem;'>"
-            f"<span style='background:{bg};color:{bc};padding:1px 6px;"
-            f"border-radius:3px;font-weight:600;'>{it['acc']}</span></div>",
-            unsafe_allow_html=True)
-        cols[3].markdown(
-            f"<div style='padding:4px 0;font-size:0.82rem;text-align:right;'>"
-            f"{int(it['price']):,}원</div>",
-            unsafe_allow_html=True)
-        alloc = cols[4].number_input("배분%", 0, 100,
-                                     value=(5 if i < 4 else 0), step=1,
-                                     key=f"ri_alloc_{i}",
-                                     label_visibility="collapsed")
-        rise  = cols[5].number_input("상승률", -5.0, 20.0, value=0.0, step=0.5,
-                                     key=f"ri_rise_{i}",
-                                     label_visibility="collapsed")
-        cols[6].markdown(
-            f"<div style='padding:4px 0;font-size:0.82rem;text-align:right;'>"
-            f"{it['monthly']:,.0f}원</div>",
-            unsafe_allow_html=True)
-        item_configs.append({**it, "sel": sel, "alloc": alloc, "rise": rise})
-
-    # 배분% 합계 = 재투자 비율 자동 계산
-    alloc_sum   = sum(c["alloc"] for c in item_configs if c["sel"])
-    ri_pct      = alloc_sum
-    consume_pct = 100 - ri_pct
-    _ri_c = "#FF4B4B" if ri_pct > 80 else "#FFD700" if ri_pct > 50 else "#7dffb0"
-    st.markdown(
-        f"<div style='display:flex;gap:24px;padding:8px 0;font-size:0.82rem;'>"
-        f"<span>재투자 비율: <b style='color:{_ri_c};font-size:1rem;'>{ri_pct}%</b></span>"
-        f"<span style='color:rgba(255,255,255,0.5);'>실수령 비율: "
-        f"<b style='color:#7dffb0;'>{consume_pct}%</b></span>"
-        f"<span style='color:rgba(255,255,255,0.35);'>재투자액: "
-        f"<b>{base_monthly*ri_pct/100:,.0f}원/월</b></span>"
-        f"<span style='color:rgba(255,255,255,0.35);'>실수령: "
-        f"<b>{base_monthly*consume_pct/100:,.0f}원/월</b></span>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-    if ri_pct > 80:
-        st.warning("⚠️ 재투자 비율이 80%를 초과합니다. 실수령 생활비가 매우 줄어듭니다.")
-
-    st.divider()
-
-    # ── 시뮬레이션 엔진 ──────────────────────────────────────
-    def _simulate(years, with_reinvest, with_rise):
-        months    = years * 12
-        qtys      = [c["qty"]   for c in item_configs]
-        prices    = [c["price"] for c in item_configs]
-        cum_extra = [0] * len(item_configs)
-        cum_dist  = 0.0
-        rows = []
-        for m in range(1, months + 1):
-            if with_rise:
-                for i, c in enumerate(item_configs):
-                    if c["rise"] != 0:
-                        prices[i] = c["price"] * ((1 + c["rise"] / 100 / 12) ** m)
-            monthly = (
-                sum(c["dps"] * qtys[i] for i, c in enumerate(item_configs))
-                + isa_income + ps_income + gen_income
-                - sum(c["dps"] * c["qty"] for c in item_configs)
-            )
-            total_ri = 0.0
-            added_qty = 0
-            if with_reinvest:
-                for i, c in enumerate(item_configs):
-                    if not c["sel"] or c["alloc"] <= 0: continue
-                    buy_amt = monthly * c["alloc"] / 100
-                    total_ri += buy_amt
-                    if prices[i] <= 0: continue
-                    nq = int(buy_amt / prices[i])
-                    qtys[i] += nq; cum_extra[i] += nq; added_qty += nq
-            consume  = monthly - total_ri
-            asset    = sum(prices[i] * qtys[i] for i in range(len(item_configs)))
-            cum_dist += monthly
-            rows.append({
-                "m": m, "monthly": monthly, "ri": total_ri,
-                "consume": consume, "asset": asset,
-                "added_qty": added_qty,
-                "cum_extra": sum(cum_extra), "cum_dist": cum_dist,
-            })
-        return rows
-
-    sim_A = _simulate(sim_yr, True,  True)   # 재투자+상승
-    sim_B = _simulate(sim_yr, True,  False)  # 재투자만
-    sim_C = _simulate(sim_yr, False, True)   # 기준(상승만)
-
-    # ── KPI 탭 3종 ───────────────────────────────────────────
-    st.markdown("#### 📊 시뮬레이션 결과 요약")
-    tab_A, tab_B, tab_C = st.tabs([
-        "A: 재투자+상승 (최적)", "B: 재투자만 (보수적)", "C: 기준 (상승만)"
-    ])
-
-    def _kpi(sim):
-        f = sim[-1]
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("현재 월 분배금", f"{base_monthly:,.0f}원")
-        k2.metric(f"{sim_yr}년 후 월 분배금",
-                  f"{f['monthly']:,.0f}원",
-                  delta=f"{(f['monthly']-base_monthly)/base_monthly*100:+.1f}%")
-        k3.metric(f"{sim_yr}년 후 자산 평가액",
-                  f"{f['asset']/100_000_000:.2f}억원",
-                  delta=(f"{(f['asset']-base_asset)/base_asset*100:+.1f}%"
-                         if base_asset > 0 else None))
-        k4.metric(f"{sim_yr}년 누적 분배금", f"{f['cum_dist']/100_000_000:.2f}억원")
-
-    with tab_A: _kpi(sim_A)
-    with tab_B: _kpi(sim_B)
-    with tab_C: _kpi(sim_C)
-
-    # ── 차트 3종 ─────────────────────────────────────────────
-    st.divider()
-    cc1, cc2, cc3 = st.columns(3)
-    _ly = dict(
-        height=260, paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(255,255,255,0.02)", font_color="white",
-        legend=dict(orientation="h", y=-0.3, xanchor="center", x=0.5, font_size=10),
-        margin=dict(t=30, b=60, l=10, r=10), hovermode="x unified",
-    )
-    qi   = [i for i in range(len(sim_A)) if (i+1) % 3 == 0]
-    qlbl = [f"{(i+1)//12}y" if (i+1) % 12 == 0 else f"{(i+1)//3}q" for i in qi]
-
-    with cc1:
-        st.markdown("**월 분배금 성장**")
-        fig1 = _go.Figure()
-        for sim, nm, clr, dash in [
-            (sim_A, "A 재투자+상승", "#7dffb0", "solid"),
-            (sim_B, "B 재투자만",    "#87CEEB", "dot"),
-            (sim_C, "C 기준",        "#888780", "dash"),
-        ]:
-            fig1.add_trace(_go.Scatter(
-                x=qlbl, y=[sim[i]["monthly"]/10000 for i in qi],
-                name=nm, line=dict(color=clr, width=2, dash=dash), mode="lines",
-            ))
-        fig1.add_hline(
-            y=ri_tgt*(1-ri_pct/100)/10000,
-            line_dash="dot", line_color="#FFD700", line_width=1,
-            annotation_text="실수령 목표", annotation_font_color="#FFD700",
-            annotation_position="top left",
-        )
-        fig1.update_layout(**_ly, yaxis=dict(title="만원", tickformat=","),
-                           xaxis=dict(tickangle=-30))
-        st.plotly_chart(fig1, use_container_width=True)
-
-    with cc2:
-        st.markdown("**자산 평가액 추이**")
-        fig2 = _go.Figure()
-        for sim, nm, clr, dash in [
-            (sim_A, "A", "#7dffb0", "solid"),
-            (sim_B, "B", "#87CEEB", "dot"),
-            (sim_C, "C", "#888780", "dash"),
-        ]:
-            fig2.add_trace(_go.Scatter(
-                x=qlbl, y=[sim[i]["asset"]/100_000_000 for i in qi],
-                name=nm, line=dict(color=clr, width=2, dash=dash), mode="lines",
-            ))
-        fig2.update_layout(**_ly, yaxis=dict(title="억원", tickformat=".2f"),
-                           xaxis=dict(tickangle=-30))
-        st.plotly_chart(fig2, use_container_width=True)
-
-    with cc3:
-        st.markdown("**현금흐름 vs 물가조정 목표**")
-        fig3 = _go.Figure()
-        fig3.add_trace(_go.Scatter(
-            x=qlbl, y=[sim_A[i]["consume"]/10000 for i in qi],
-            name="A 실수령", line=dict(color="#FFD700", width=2), mode="lines",
-            fill="tozeroy", fillcolor="rgba(255,215,0,0.06)",
-        ))
-        fig3.add_trace(_go.Scatter(
-            x=qlbl,
-            y=[ri_tgt * (1 + inf_pct/100) ** ((i+1)/12) / 10000 for i in qi],
-            name="물가조정 목표",
-            line=dict(color="#FF4B4B", width=1.5, dash="dot"), mode="lines",
-        ))
-        fig3.update_layout(**_ly, yaxis=dict(title="만원", tickformat=","),
-                           xaxis=dict(tickangle=-30))
-        st.plotly_chart(fig3, use_container_width=True)
-
-    # ── 연도별 비교 테이블 ───────────────────────────────────
-    st.divider()
-    st.markdown("#### 📋 연도별 시나리오 비교")
-    tbl_rows = []
-    for yr in range(1, sim_yr + 1):
-        idx     = yr * 12 - 1
-        adj_tgt = ri_tgt * ((1 + inf_pct/100) ** yr)
-        a, b, c = sim_A[idx], sim_B[idx], sim_C[idx]
-        gp      = a["consume"] / adj_tgt * 100 if adj_tgt > 0 else 0
-        tbl_rows.append({
-            "연도":       f"{yr}년",
-            "A 월분배금": f"{a['monthly']:,.0f}원",
-            "A 자산":     f"{a['asset']/100_000_000:.2f}억",
-            "A 실수령":   f"{a['consume']:,.0f}원",
-            "B 자산":     f"{b['asset']/100_000_000:.2f}억",
-            "B 실수령":   f"{b['consume']:,.0f}원",
-            "C 자산":     f"{c['asset']/100_000_000:.2f}억",
-            "C 실수령":   f"{c['consume']:,.0f}원",
-            "목표달성률": f"{gp:.0f}%",
-            "물가목표":   f"{adj_tgt:,.0f}원",
-        })
-    st.dataframe(pd.DataFrame(tbl_rows), hide_index=True, use_container_width=True)
-
-    # ── 월별 상세 ────────────────────────────────────────────
-    with st.expander("📅 월별 상세 현금흐름 (A 시나리오)", expanded=False):
-        d_rows = []
-        for r in sim_A:
-            adj_tgt = ri_tgt * ((1 + inf_pct/100) ** (r["m"]/12))
-            d_rows.append({
-                "월":          f"{r['m']}m",
-                "월분배금":    f"{r['monthly']:,.0f}원",
-                "재투자액":    f"{r['ri']:,.0f}원",
-                "매수수량":    f"{r['added_qty']}주",
-                "누적추가수량": f"{r['cum_extra']}주",
-                "자산평가액":  f"{r['asset']/100_000_000:.3f}억",
-                "실수령":      f"{r['consume']:,.0f}원",
-                "목표달성률":  f"{r['consume']/adj_tgt*100:.0f}%",
-            })
-        st.dataframe(pd.DataFrame(d_rows), hide_index=True, use_container_width=True)
-
-    # ── 유의사항 ─────────────────────────────────────────────
-    st.divider()
-    st.markdown("#### ⚠️ 재투자 시 유의사항")
-    n1, n2, n3 = st.columns(3)
-    for col, title, color, body in [
-        (n1, "과세 발생", "#FF4B4B",
-         "분배금을 재투자해도 수령 시점에 과세됩니다. "
-         "IRP 퇴직금 원천: 0.76~1.1% 퇴직소득세, 개인납입·연금저축: 5.5% 연금소득세."),
-        (n2, "납입 한도", "#FFD700",
-         "IRP·연금저축 추가 납입 시 연간 한도(각 1,800만원) 확인이 필요합니다. "
-         "퇴직금으로 채워진 IRP는 추가 납입 여력이 제한될 수 있습니다."),
-        (n3, "과세표준 증가", "#87CEEB",
-         "재투자로 수량이 늘면 분배금과 과세표준도 증가합니다. "
-         "연금소득 1,500만원 한도를 과세관리 탭에서 함께 모니터링하세요."),
-    ]:
-        col.markdown(
-            f"<div style='background:rgba(255,255,255,0.03);"
-            f"border-left:4px solid {color};"
-            f"padding:10px 14px;border-radius:0 8px 8px 0;font-size:0.83rem;line-height:1.7;'>"
-            f"<b style='color:{color};'>{title}</b><br>{body}</div>",
-            unsafe_allow_html=True,
-        )
-
-
-with _main_tab9:
-    _render_reinvest_tab(
-        pension_items={
-            "IRP":     _pension_irp_items,
-            "ISA":     _pension_isa_items,
-            "일반":    _pension_gen_items,
-            "연금저축": _pension_ps_items,
-        },
-        irp_income=irp_income,
-        isa_income=isa_income,
-        ps_income=ps_income,
-        gen_income=_gen_monthly_income,
-        irp_total=irp_total,
-        isa_total=isa_total,
-        ps_total=ps_total,
-        target_monthly=target_monthly,
-        sc_df=sc_df,
-        sc_names=sc_names,
-    )

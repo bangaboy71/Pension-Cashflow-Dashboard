@@ -668,8 +668,11 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
     종목코드 → (현재가(원), 전일대비%, 전일대비금액) 반환.
 
     조회 순서:
-      1. Yahoo Finance (KRX 순수숫자 코드 / 미국 주식 USD→원화 자동환산)
-      2. Yahoo 실패 시 → 네이버 증권 polling API 폴백
+      1. Yahoo Finance
+         - meta['chartPreviousClose'] 우선 사용 (전일 종가 직접 제공, 가장 안정적)
+         - regularMarketChangePercent / regularMarketChange 도 활용
+         - 미국 주식: USD → 원화 자동환산
+      2. Yahoo 실패 → 네이버 증권 polling API 폴백
          (KRX 혼합코드 0040Y0, 0018C0, 0177R0 등 Yahoo 미등록 종목 지원)
     """
     ycode = _normalize_code(code)
@@ -697,31 +700,46 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
             fx = _fetch_usd_krw() if currency == "USD" else 1.0
             now_p = int(round(now_p_raw * fx))
 
-            # 직전 거래일 종가
-            now_kst = _dt.datetime.utcnow() + _dt.timedelta(hours=9)
-            today_start_utc = int(
-                _dt.datetime(now_kst.year, now_kst.month, now_kst.day)
-                .replace(tzinfo=_dt.timezone.utc).timestamp()
-            ) - 9 * 3600
+            # ── 전일 종가: chartPreviousClose 우선 사용 ──────
+            # timestamp 배열 순회보다 훨씬 안정적
+            # (데이터 부족·timezone 오차 문제 없음)
+            prev_p_raw = float(
+                meta.get("chartPreviousClose", 0) or
+                meta.get("previousClose", 0) or 0
+            )
 
-            ts_list  = result.get("timestamp", [])
-            cls_list = result["indicators"]["quote"][0].get("close", [])
-
-            prev_p_raw = 0.0
-            for ts, cl in zip(reversed(ts_list), reversed(cls_list)):
-                if cl is None or cl <= 0: continue
-                if ts < today_start_utc:
-                    prev_p_raw = cl; break
+            # chartPreviousClose도 없으면 timestamp 배열 폴백
             if prev_p_raw == 0:
-                valid = [(t,cl) for t,cl in zip(ts_list,cls_list) if cl and cl>0]
-                if len(valid) >= 2:
-                    prev_p_raw = valid[-2][1]
+                now_kst = _dt.datetime.utcnow() + _dt.timedelta(hours=9)
+                today_start_utc = int(
+                    _dt.datetime(now_kst.year, now_kst.month, now_kst.day)
+                    .replace(tzinfo=_dt.timezone.utc).timestamp()
+                ) - 9 * 3600
+                ts_list  = result.get("timestamp", [])
+                cls_list = result["indicators"]["quote"][0].get("close", [])
+                for ts, cl in zip(reversed(ts_list), reversed(cls_list)):
+                    if cl is None or cl <= 0: continue
+                    if ts < today_start_utc:
+                        prev_p_raw = cl; break
+                if prev_p_raw == 0:
+                    valid = [(t, cl) for t, cl in zip(ts_list, cls_list) if cl and cl > 0]
+                    if len(valid) >= 2:
+                        prev_p_raw = valid[-2][1]
+
             if prev_p_raw == 0:
                 prev_p_raw = now_p_raw
 
             prev_p  = int(round(prev_p_raw * fx))
             chg_amt = now_p - prev_p
             chg_pct = (chg_amt / prev_p * 100) if prev_p > 0 else 0.0
+
+            # Yahoo meta에 직접 변동율이 있으면 더 정확
+            direct_pct = float(meta.get("regularMarketChangePercent", 0) or 0)
+            direct_amt = float(meta.get("regularMarketChange", 0) or 0)
+            if direct_pct != 0:
+                chg_pct = round(direct_pct, 2)
+                chg_amt = int(round(direct_amt * fx))
+
             return now_p, round(chg_pct, 2), chg_amt
     except Exception:
         pass

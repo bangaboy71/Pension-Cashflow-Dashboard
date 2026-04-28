@@ -668,7 +668,10 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
     종목코드 → (현재가(원), 전일대비%, 전일대비금액) 반환.
 
     조회 순서:
-      1. Yahoo Finance (KRX 순수숫자 코드 / 미국 주식 USD→원화 자동환산)
+      1. Yahoo Finance
+         - meta['chartPreviousClose'] 우선 사용 (전일 종가 직접 제공, 가장 안정적)
+         - 없으면 timestamp 배열 순회로 전일 종가 계산
+         - 미국 주식: USD → 원화 자동환산
       2. Yahoo 실패 시 → 네이버 증권 polling API 폴백
          (KRX 혼합코드 0040Y0, 0018C0, 0177R0 등 Yahoo 미등록 종목 지원)
     """
@@ -697,25 +700,28 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
             fx = _fetch_usd_krw() if currency == "USD" else 1.0
             now_p = int(round(now_p_raw * fx))
 
-            # 직전 거래일 종가
-            now_kst = _dt.datetime.utcnow() + _dt.timedelta(hours=9)
-            today_start_utc = int(
-                _dt.datetime(now_kst.year, now_kst.month, now_kst.day)
-                .replace(tzinfo=_dt.timezone.utc).timestamp()
-            ) - 9 * 3600
+            # 전일 종가: meta['chartPreviousClose'] 우선 사용
+            # → timestamp 배열 순회보다 훨씬 안정적 (빈 데이터·timezone 문제 없음)
+            prev_p_raw = float(meta.get("chartPreviousClose", 0) or
+                               meta.get("previousClose", 0) or 0)
 
-            ts_list  = result.get("timestamp", [])
-            cls_list = result["indicators"]["quote"][0].get("close", [])
-
-            prev_p_raw = 0.0
-            for ts, cl in zip(reversed(ts_list), reversed(cls_list)):
-                if cl is None or cl <= 0: continue
-                if ts < today_start_utc:
-                    prev_p_raw = cl; break
+            # chartPreviousClose가 없으면 timestamp 배열 순회 폴백
             if prev_p_raw == 0:
-                valid = [(t,cl) for t,cl in zip(ts_list,cls_list) if cl and cl>0]
-                if len(valid) >= 2:
-                    prev_p_raw = valid[-2][1]
+                now_kst = _dt.datetime.utcnow() + _dt.timedelta(hours=9)
+                today_start_utc = int(
+                    _dt.datetime(now_kst.year, now_kst.month, now_kst.day)
+                    .replace(tzinfo=_dt.timezone.utc).timestamp()
+                ) - 9 * 3600
+                ts_list  = result.get("timestamp", [])
+                cls_list = result["indicators"]["quote"][0].get("close", [])
+                for ts, cl in zip(reversed(ts_list), reversed(cls_list)):
+                    if cl is None or cl <= 0: continue
+                    if ts < today_start_utc:
+                        prev_p_raw = cl; break
+                if prev_p_raw == 0:
+                    valid = [(t, cl) for t, cl in zip(ts_list, cls_list) if cl and cl > 0]
+                    if len(valid) >= 2:
+                        prev_p_raw = valid[-2][1]
             if prev_p_raw == 0:
                 prev_p_raw = now_p_raw
 
@@ -1751,12 +1757,10 @@ def _render_watchlist_tab(
         st.session_state["wl_tbl_stock"] = _tbl_selected
         st.caption(f"🔍 **{_tbl_selected}** 선택됨")
 
-    # 계좌별 월분배금 합계 요약 — 계좌 컬럼 없을 시 방어 처리
-    if "계좌" not in wl_df.columns:
-        wl_df["계좌"] = "기타"
+    # 계좌별 월분배금 합계 요약
     acc_sum      = wl_df.groupby("계좌")["세후분배금"].sum()
     total_wl_net = wl_df["세후분배금"].sum()
-    total_eval   = wl_df["평가액_실시간"].sum() if "평가액_실시간" in wl_df.columns else 0.0
+    total_eval   = wl_df["평가액_실시간"].sum()
 
     _sm_cols = st.columns(len(acc_sum) + 2)
     for i, (acc, val) in enumerate(acc_sum.items()):

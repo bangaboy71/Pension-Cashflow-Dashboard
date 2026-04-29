@@ -697,25 +697,40 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
             fx = _fetch_usd_krw() if currency == "USD" else 1.0
             now_p = int(round(now_p_raw * fx))
 
-            # 직전 거래일 종가
-            now_kst = _dt.datetime.utcnow() + _dt.timedelta(hours=9)
-            today_start_utc = int(
-                _dt.datetime(now_kst.year, now_kst.month, now_kst.day)
-                .replace(tzinfo=_dt.timezone.utc).timestamp()
-            ) - 9 * 3600
+            # ── 전일대비: 3단 우선순위 ───────────────────────
+            # 1순위: regularMarketChangePercent / regularMarketChange
+            #        Yahoo meta에 직접 포함 → 가장 정확
+            direct_pct = float(meta.get("regularMarketChangePercent", 0) or 0)
+            direct_chg = float(meta.get("regularMarketChange", 0) or 0)
+            if direct_pct != 0 or direct_chg != 0:
+                chg_amt = int(round(direct_chg * fx))
+                chg_pct = round(direct_pct, 2)
+                return now_p, chg_pct, chg_amt
 
-            ts_list  = result.get("timestamp", [])
-            cls_list = result["indicators"]["quote"][0].get("close", [])
+            # 2순위: chartPreviousClose (전일 종가 직접 제공)
+            prev_p_raw = float(
+                meta.get("chartPreviousClose", 0) or
+                meta.get("previousClose", 0) or 0
+            )
 
-            prev_p_raw = 0.0
-            for ts, cl in zip(reversed(ts_list), reversed(cls_list)):
-                if cl is None or cl <= 0: continue
-                if ts < today_start_utc:
-                    prev_p_raw = cl; break
+            # 3순위: timestamp 배열 순회 (마지막 폴백)
             if prev_p_raw == 0:
-                valid = [(t,cl) for t,cl in zip(ts_list,cls_list) if cl and cl>0]
-                if len(valid) >= 2:
-                    prev_p_raw = valid[-2][1]
+                now_kst = _dt.datetime.utcnow() + _dt.timedelta(hours=9)
+                today_start_utc = int(
+                    _dt.datetime(now_kst.year, now_kst.month, now_kst.day)
+                    .replace(tzinfo=_dt.timezone.utc).timestamp()
+                ) - 9 * 3600
+                ts_list  = result.get("timestamp", [])
+                cls_list = result["indicators"]["quote"][0].get("close", [])
+                for ts, cl in zip(reversed(ts_list), reversed(cls_list)):
+                    if cl is None or cl <= 0: continue
+                    if ts < today_start_utc:
+                        prev_p_raw = cl; break
+                if prev_p_raw == 0:
+                    valid = [(t, cl) for t, cl in zip(ts_list, cls_list) if cl and cl > 0]
+                    if len(valid) >= 2:
+                        prev_p_raw = valid[-2][1]
+
             if prev_p_raw == 0:
                 prev_p_raw = now_p_raw
 
@@ -753,114 +768,52 @@ def _krx_to_naver_code(code: str) -> str:
 
 def _fetch_naver_price(naver_code: str) -> tuple[int, float, float]:
     """
-    네이버 증권 → (현재가, 전일대비%, 전일대비금액).
-    Yahoo 미등록 KRX 혼합코드(0040Y0, 0018C0, 0177R0 등) 전용.
-
-    조회 순서:
-      1. 네이버 polling API (realtime) → compareToPreviousPrice 파싱
-      2. polling 실패 or 전일대비 없음 → fchart XML API (최근 2거래일 종가 diff)
+    네이버 증권 polling API → (현재가, 전일대비%, 전일대비금액).
+    Yahoo 미등록 KRX 혼합코드(0040Y0, 0018C0, 0177R0 등) 폴백 소스.
     """
     if not naver_code:
         return 0, 0.0, 0.0
-
-    import requests as _req
-
-    _headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer":    "https://finance.naver.com",
-        "Accept":     "application/json, text/html, */*",
-    }
-
-    # ── 1. 네이버 polling API ─────────────────────────────
-    now_p, raw_pct, raw_amt = 0, 0.0, 0
-
     try:
-        url = (f"https://polling.finance.naver.com/api/realtime"
-               f"/domestic/stock/{naver_code}")
-        res = _req.get(url, headers=_headers, timeout=6)
+        import requests as _req
+        url = (
+            f"https://polling.finance.naver.com/api/realtime"
+            f"/domestic/stock/{naver_code}"
+        )
+        res = _req.get(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer":    "https://finance.naver.com",
+            },
+            timeout=6,
+        )
+        if res.status_code != 200:
+            return 0, 0.0, 0.0
 
-        if res.status_code == 200:
-            d = res.json().get("datas", [{}])[0]
+        d = res.json().get("datas", [{}])[0]
+        now_p = int(str(d.get("closePrice", "0")).replace(",", "") or 0)
+        if now_p == 0:
+            return 0, 0.0, 0.0
 
-            # 현재가
-            now_p = int(str(d.get("closePrice", "0")).replace(",", "") or 0)
+        ctp     = d.get("compareToPreviousPrice", {})
+        pct_str = str(ctp.get("fluctuationsRatio", "0")).replace(",", "").replace("%", "")
+        amt_str = str(ctp.get("diff", "0")).replace(",", "").replace("+", "").replace("-", "")
+        try:
+            raw_pct = float(pct_str)
+            raw_amt = int(amt_str)
+        except ValueError:
+            raw_pct, raw_amt = 0.0, 0
 
-            if now_p > 0:
-                # ── 전일대비: compareToPreviousPrice 우선 ──
-                ctp = d.get("compareToPreviousPrice", {}) or {}
-                pct_str = str(ctp.get("fluctuationsRatio", "") or
-                              ctp.get("changeRate", "") or "").replace(",","").replace("%","")
-                amt_str = str(ctp.get("diff", "") or
-                              ctp.get("change", "") or "").replace(",","").replace("+","").replace("-","")
+        # 등락 부호: code "2"=상승 "5"=하락 "3"=보합
+        sign = str(ctp.get("code", "") or ctp.get("fluctuationType", "")).upper()
+        if sign in ("5", "LOWER", "하락"):
+            raw_pct, raw_amt = -abs(raw_pct), -abs(raw_amt)
+        else:
+            raw_pct, raw_amt = abs(raw_pct), abs(raw_amt)
 
-                # ── stockItemTotalInfos 배열에서도 탐색 (ETF 혼합코드) ──
-                if not pct_str:
-                    for item in d.get("stockItemTotalInfos", []):
-                        label = str(item.get("label","") or item.get("name",""))
-                        if "등락" in label or "변동" in label or "등락률" in label:
-                            val = str(item.get("value","") or "").replace(",","").replace("%","").replace("+","").replace("-","")
-                            if val.replace(".","").isdigit():
-                                pct_str = val
-                        if "전일대비" in label or "대비" in label:
-                            val2 = str(item.get("value","") or "").replace(",","").replace("+","").replace("-","")
-                            if val2.isdigit():
-                                amt_str = val2
-
-                try:
-                    raw_pct = float(pct_str) if pct_str else 0.0
-                    raw_amt = int(amt_str)   if amt_str else 0
-                except (ValueError, TypeError):
-                    raw_pct, raw_amt = 0.0, 0
-
-                # 부호 결정 (code: "2"=상승 "5"=하락 "3"=보합)
-                sign = str(ctp.get("code", "") or ctp.get("fluctuationType", "")).upper()
-                if sign in ("5", "LOWER", "하락", "FALL"):
-                    raw_pct, raw_amt = -abs(raw_pct), -abs(raw_amt)
-                elif sign in ("2", "UPPER", "상승", "RISE"):
-                    raw_pct, raw_amt = abs(raw_pct), abs(raw_amt)
-                elif raw_pct == 0 and raw_amt == 0:
-                    pass  # 보합
-    except Exception:
-        pass
-
-    # polling으로 현재가 확보됐고 전일대비도 있으면 반환
-    if now_p > 0 and (raw_pct != 0 or raw_amt != 0):
         return now_p, round(raw_pct, 2), raw_amt
-
-    # ── 2. fchart XML API: 최근 2거래일 종가 → 전일대비 직접 계산 ──
-    # polling에서 현재가는 있지만 전일대비가 0인 경우도 이 경로 사용
-    try:
-        xml_url = (f"https://fchart.stock.naver.com/sise.nhn"
-                   f"?symbol={naver_code}&timeframe=day&count=3&requestType=0")
-        xres = _req.get(xml_url, headers=_headers, timeout=6)
-
-        if xres.status_code == 200 and xres.text.strip():
-            import re as _re
-            # XML: <item data="날짜|시가|고가|저가|종가|거래량" />
-            items = _re.findall(r'data="([^"]+)"', xres.text)
-            closes = []
-            for item in items:
-                parts = item.split("|")
-                if len(parts) >= 5:
-                    try:
-                        closes.append(int(parts[4]))
-                    except ValueError:
-                        pass
-
-            if len(closes) >= 2:
-                fchart_curr = closes[-1]
-                fchart_prev = closes[-2]
-                if now_p == 0:
-                    now_p = fchart_curr
-                if fchart_prev > 0:
-                    diff     = now_p - fchart_prev
-                    diff_pct = diff / fchart_prev * 100
-                    return now_p, round(diff_pct, 2), diff
     except Exception:
-        pass
-
-    # polling 현재가만 있고 전일대비 계산 실패
-    return now_p, 0.0, 0
+        return 0, 0.0, 0.0
 
 
 @st.cache_data(ttl="3m", show_spinner=False)

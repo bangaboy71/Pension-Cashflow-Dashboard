@@ -663,20 +663,161 @@ def _fetch_usd_krw() -> float:
         return 1380.0
 
 
+def _get_code_type(code: str) -> str:
+    """
+    종목코드 타입 분류 → 처리 경로 결정.
+      'us'    : 순수 영문  (SNDK, PLTR)    → Yahoo USD→원화
+      'krx'   : 순수 숫자  (189400, 498400) → Yahoo KRW
+      'mixed' : 영숫자 혼합 (0040Y0, 0018C0) → 네이버 전용
+      'dotted': 점 포함    (189400.KS)      → Yahoo 그대로
+    """
+    c = str(code).strip().upper()
+    if not c or c in ("NAN", "0", ""):
+        return "unknown"
+    if "." in c:
+        return "dotted"
+    if c.isalpha():
+        return "us"
+    if c.isdigit():
+        return "krx"
+    return "mixed"
+
+
+def _fetch_krx_mixed_price(raw_code: str) -> tuple[int, float, float]:
+    """
+    KRX 혼합코드(0040Y0, 0018C0, 0177R0 등) 전용 가격 수집.
+    Yahoo Finance 미등록 → 네이버 전용 2단계 경로.
+
+    1단계: 네이버 polling API
+      - compareToPreviousPrice 파싱
+      - stockItemTotalInfos 배열 탐색 (ETF 혼합코드 대응)
+    2단계: fchart XML API (폴백)
+      - 최근 3거래일 종가 파싱 → diff 계산
+    """
+    import requests as _req
+    naver_code = raw_code.upper().replace(".KS","").replace(".KQ","")
+    if not naver_code:
+        return 0, 0.0, 0.0
+
+    _headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer":    "https://finance.naver.com",
+        "Accept":     "application/json, */*",
+    }
+
+    now_p, raw_pct, raw_amt = 0, 0.0, 0
+
+    # ── 1단계: 네이버 polling API ─────────────────────────
+    try:
+        url = (f"https://polling.finance.naver.com/api/realtime"
+               f"/domestic/stock/{naver_code}")
+        res = _req.get(url, headers=_headers, timeout=6)
+
+        if res.status_code == 200:
+            d = res.json().get("datas", [{}])[0]
+            now_p = int(str(d.get("closePrice","0")).replace(",","") or 0)
+
+            if now_p > 0:
+                ctp = d.get("compareToPreviousPrice", {}) or {}
+                pct_str = str(ctp.get("fluctuationsRatio","") or
+                              ctp.get("changeRate","") or "").replace(",","").replace("%","")
+                amt_str = str(ctp.get("diff","") or
+                              ctp.get("change","") or "").replace(",","").replace("+","").replace("-","")
+
+                # ETF 혼합코드: stockItemTotalInfos 배열 탐색
+                if not pct_str:
+                    for item in d.get("stockItemTotalInfos", []):
+                        label = str(item.get("label","") or item.get("name",""))
+                        val   = str(item.get("value","") or "").replace(",","").replace("%","").replace("+","").replace("-","")
+                        if "등락률" in label or "등락율" in label or "변동률" in label:
+                            if val.replace(".","").isdigit():
+                                pct_str = val
+                        elif ("전일대비" in label or "대비" in label) and not amt_str:
+                            if val.isdigit():
+                                amt_str = val
+
+                try:
+                    raw_pct = float(pct_str) if pct_str else 0.0
+                    raw_amt = int(amt_str)   if amt_str else 0
+                except (ValueError, TypeError):
+                    raw_pct, raw_amt = 0.0, 0
+
+                sign = str(ctp.get("code","") or ctp.get("fluctuationType","")).upper()
+                if sign in ("5","LOWER","하락","FALL"):
+                    raw_pct, raw_amt = -abs(raw_pct), -abs(raw_amt)
+                elif sign in ("2","UPPER","상승","RISE"):
+                    raw_pct, raw_amt = abs(raw_pct), abs(raw_amt)
+    except Exception:
+        pass
+
+    # polling 성공 (전일대비 포함) → 즉시 반환
+    if now_p > 0 and (raw_pct != 0 or raw_amt != 0):
+        return now_p, round(raw_pct, 2), raw_amt
+
+    # ── 2단계: fchart XML API 폴백 ────────────────────────
+    try:
+        xml_url = (f"https://fchart.stock.naver.com/sise.nhn"
+                   f"?symbol={naver_code}&timeframe=day&count=3&requestType=0")
+        xres = _req.get(xml_url, headers=_headers, timeout=6)
+
+        if xres.status_code == 200 and xres.text.strip():
+            import re as _re
+            items  = _re.findall(r'data="([^"]+)"', xres.text)
+            closes = []
+            for it in items:
+                parts = it.split("|")
+                if len(parts) >= 5:
+                    try:
+                        closes.append(int(parts[4]))
+                    except ValueError:
+                        pass
+
+            if len(closes) >= 2:
+                curr = closes[-1]
+                prev = closes[-2]
+                if now_p == 0:
+                    now_p = curr
+                if prev > 0:
+                    diff     = now_p - prev
+                    diff_pct = diff / prev * 100
+                    return now_p, round(diff_pct, 2), diff
+    except Exception:
+        pass
+
+    # 현재가만 있고 전일대비 계산 실패
+    return now_p, 0.0, 0
+
+
 def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
     """
-    종목코드 → (현재가(원), 전일대비%, 전일대비금액) 반환.
+    종목코드 타입을 먼저 판별하고 최적 경로로 가격 수집.
 
-    조회 순서:
-      1. Yahoo Finance (KRX 순수숫자 코드 / 미국 주식 USD→원화 자동환산)
-      2. Yahoo 실패 시 → 네이버 증권 polling API 폴백
-         (KRX 혼합코드 0040Y0, 0018C0, 0177R0 등 Yahoo 미등록 종목 지원)
+    혼합코드 (0040Y0, 0018C0, 0177R0 등)
+      → _fetch_krx_mixed_price() : 네이버 전용 2단계 경로
+         1단계: 네이버 polling (compareToPreviousPrice + stockItemTotalInfos)
+         2단계: fchart XML (최근 종가 diff)
+
+    순수숫자 KRX (189400, 498400) / 미국 주식 (SNDK)
+      → Yahoo Finance 경로
+         1순위: regularMarketChangePercent (직접 제공, 가장 안정적)
+         2순위: chartPreviousClose (전일 종가)
+         3순위: timestamp 배열 순회
     """
-    ycode = _normalize_code(code)
+    raw = str(code).strip().upper()
+    if not raw or raw in ("NAN", "0", ""):
+        return 0, 0.0, 0.0
+
+    code_type = _get_code_type(raw)
+
+    # ── 혼합코드 전용 경로 ────────────────────────────────
+    if code_type == "mixed":
+        return _fetch_krx_mixed_price(raw)
+
+    # ── Yahoo Finance 경로 (순수숫자 KRX / 미국주식 / dotted) ─
+    ycode = _normalize_code(raw)
     if not ycode:
         return 0, 0.0, 0.0
 
-    # ── 1. Yahoo Finance 시도 ────────────────────────────
     try:
         import requests as _req
         import datetime as _dt
@@ -692,20 +833,15 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
 
         now_p_raw = float(meta.get("regularMarketPrice", 0))
         if now_p_raw > 0:
-            # 통화 감지 → USD면 원화 환산
             currency = str(meta.get("currency", "KRW")).upper()
-            fx = _fetch_usd_krw() if currency == "USD" else 1.0
-            now_p = int(round(now_p_raw * fx))
+            fx       = _fetch_usd_krw() if currency == "USD" else 1.0
+            now_p    = int(round(now_p_raw * fx))
 
-            # ── 전일대비: 3단 우선순위 ───────────────────────
-            # 1순위: regularMarketChangePercent / regularMarketChange
-            #        Yahoo meta에 직접 포함 → 가장 정확
+            # 1순위: regularMarketChangePercent (Yahoo 직접 제공)
             direct_pct = float(meta.get("regularMarketChangePercent", 0) or 0)
             direct_chg = float(meta.get("regularMarketChange", 0) or 0)
             if direct_pct != 0 or direct_chg != 0:
-                chg_amt = int(round(direct_chg * fx))
-                chg_pct = round(direct_pct, 2)
-                return now_p, chg_pct, chg_amt
+                return now_p, round(direct_pct, 2), int(round(direct_chg * fx))
 
             # 2순위: chartPreviousClose (전일 종가 직접 제공)
             prev_p_raw = float(
@@ -713,7 +849,7 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
                 meta.get("previousClose", 0) or 0
             )
 
-            # 3순위: timestamp 배열 순회 (마지막 폴백)
+            # 3순위: timestamp 배열 순회
             if prev_p_raw == 0:
                 now_kst = _dt.datetime.utcnow() + _dt.timedelta(hours=9)
                 today_start_utc = int(
@@ -740,12 +876,6 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
             return now_p, round(chg_pct, 2), chg_amt
     except Exception:
         pass
-
-    # ── 2. Yahoo 실패 → 네이버 증권 폴백 ────────────────
-    # 순수 영문 티커(미국 주식)는 네이버 미지원이므로 건너뜀
-    naver_code = _krx_to_naver_code(ycode)
-    if naver_code:
-        return _fetch_naver_price(naver_code)
 
     return 0, 0.0, 0.0
 

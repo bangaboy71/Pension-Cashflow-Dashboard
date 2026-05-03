@@ -1558,14 +1558,18 @@ def _calc_net_dist(row, dist_tax_df) -> float:
     종목·계좌별 세후분배금 계산 — 과세표준 기반.
 
     과세 원칙:
-      IRP / 연금저축 : 과세표준 × 5.5%
-      ISA           : 과세표준 × 9.9%
-      일반계좌       : 과세표준 × 15.4%
+      IRP / 연금저축 : 과세표준 × 5.5% (연금소득세, 과세이연 후 수령 시)
+      ISA           : 과세표준 × 9.9% (비과세한도 초과분 분리과세)
+      일반계좌       : 과세표준 × 15.4% (배당소득세)
 
     과세표준 조회 우선순위:
-      1순위: row 자체에 '과세표준(원)' 컬럼 있음 (시나리오 시트 직접 반영)
-      2순위: 분배금과세 시트에서 종목명 매칭
-      3순위: 시트 없거나 미입력 → 분배금 전액을 과세표준으로 보수적 처리
+      1순위: 분배금과세 시트의 '과세표준(원)' — 종목명 매칭
+      2순위: 시트 없거나 미입력 → 분배금 전액을 과세표준으로 보수적 처리
+
+    ETF 유형별 특성:
+      - 커버드콜 ETF: 옵션 프리미엄 부분 비과세 → 과세표준 < 분배금
+      - 채권혼합형:   채권이자 과세 → 과세표준 ≤ 분배금
+      - 국내주식형:   배당소득 전액 과세표준
     """
     import pandas as pd
 
@@ -1576,43 +1580,38 @@ def _calc_net_dist(row, dist_tax_df) -> float:
     acc     = str(row.get("계좌", "") or "")
     nm      = str(row.get("종목명", "") or "")
     qty     = float(row.get("수량", 0) or 0)
-    dps     = float(row.get("주당분배금", 0) or 0)
 
+    # ── 과세표준 조회 ──────────────────────────────────────
+    # 주당과세표준 × 수량 = 과세표준 합계
     taxbase_amt = dist_amt  # 기본값: 전액 과세 (보수적)
 
-    # ── 1순위: row 자체에 과세표준(원) 포함 (시나리오 시트) ──
-    row_tax_dps = row.get("과세표준(원)", None)
-    if row_tax_dps is not None:
-        try:
-            row_tax_dps = float(row_tax_dps)
-            if dps > 0 and row_tax_dps >= 0:
-                tax_ratio   = row_tax_dps / dps
-                taxbase_amt = dist_amt * tax_ratio
-        except (TypeError, ValueError):
-            pass
-
-    # ── 2순위: 분배금과세 시트에서 종목명 매칭 ──────────────
-    elif dist_tax_df is not None and not dist_tax_df.empty and qty > 0:
+    if dist_tax_df is not None and not dist_tax_df.empty and qty > 0:
         def _n(s): return str(s).strip().replace(" ", "").upper()
         nm_n = _n(nm)
+        # 계좌 조건도 매칭 (같은 종목이 복수 계좌에 있을 수 있음)
         mask = dist_tax_df["종목명"].astype(str).apply(_n) == nm_n
         if "계좌" in dist_tax_df.columns:
             acc_mask = dist_tax_df["계좌"].astype(str).str.strip() == acc
             if (mask & acc_mask).any():
                 mask = mask & acc_mask
         if mask.any():
-            row_sh  = dist_tax_df[mask].iloc[-1]
-            dps_sh  = float(row_sh.get("분배금(원)",  0) or 0)
-            tax_sh  = float(row_sh.get("과세표준(원)", 0) or 0)
-            if dps_sh > 0:
-                taxbase_amt = dist_amt * (tax_sh / dps_sh)
+            row_sh = dist_tax_df[mask].iloc[-1]  # 최신 행 사용
+            dps      = float(row_sh.get("분배금(원)",  0) or 0)
+            tax_dps  = float(row_sh.get("과세표준(원)", 0) or 0)
+            if dps > 0:
+                # 과세표준 비율을 실제 분배금에 적용
+                tax_ratio   = tax_dps / dps          # 예: 60/350 = 0.171
+                taxbase_amt = dist_amt * tax_ratio   # 실제분배금 × 과세비율
 
     # ── 계좌별 세율 적용 ──────────────────────────────────
     if acc in ("IRP", "연금저축"):
+        # 연금소득세 5.5% (과세이연 후 수령 시)
         tax = taxbase_amt * IRP_TAX_RATE
     elif acc == "ISA":
+        # 9.9% 분리과세 (비과세한도 초과분)
         tax = taxbase_amt * 0.099
     else:
+        # 일반계좌: 배당소득세 15.4%
         tax = taxbase_amt * 0.154
 
     return dist_amt - tax
@@ -2718,51 +2717,26 @@ def build_scenario_params(sc_df: pd.DataFrame, sc_name: str) -> dict:
     관심종목 구조(수량·주당분배금·평가액) 지원:
       월분배금 = 수량×주당분배금  >  평가액×분배율(%)  순 우선
       가중평균분배율 = 월분배금합계 / 원금합계 × 100
-
-    과세표준 처리:
-      시나리오 시트에 '과세표준(원)' 컬럼이 있으면 종목별 과세표준 추출
-      → _calc_net_dist에서 분배금과세 시트 대신 사용
-
-    미입력 계좌 처리:
-      시나리오에 해당 계좌 행이 없으면 total=0, rate=0으로 명시적 초기화
-      → 다른 시나리오의 수치가 잔류하지 않음
     """
     sub = sc_df[sc_df["시나리오명"] == sc_name].copy()
     result = {
         "irp_total": 0.0, "isa_total": 0.0, "gen_total": 0.0, "ps_total": 0.0,
         "irp_rate":  0.0, "isa_rate":  0.0, "gen_rate":  0.0, "ps_rate":  0.0,
         "irp_종목": [],   "isa_종목": [],   "gen_종목": [],   "ps_종목": [],
-        "irp_personal_ratio": None,
-        # 계좌별 존재 여부 (명시적 0 초기화 판단용)
-        "irp_exists": False, "isa_exists": False,
-        "gen_exists": False, "ps_exists":  False,
+        "irp_personal_ratio": None,  # None = 슬라이더 사용
     }
     acc_map = {"IRP": "irp", "ISA": "isa", "일반": "gen", "연금저축": "ps"}
-
     for acc_kr, acc_en in acc_map.items():
         rows = sub[sub["계좌"] == acc_kr]
-
-        # ★ 계좌 행 존재 여부 명시적 기록
-        result[f"{acc_en}_exists"] = not rows.empty
-
-        if rows.empty:
-            # 시나리오에 해당 계좌 없음 → 0으로 확정 (잔류 방지)
-            result[f"{acc_en}_total"] = 0.0
-            result[f"{acc_en}_rate"]  = 0.0
-            result[f"{acc_en}_종목"]  = []
-            continue
-
         rows = rows.copy()
-        for _nc in ["원금","수량","주당분배금","현재가","분배율(%)","과세표준(원)"]:
+        for _nc in ["원금","수량","주당분배금","현재가","분배율(%)"]:
             if _nc in rows.columns:
                 rows[_nc] = pd.to_numeric(
                     rows[_nc].astype(str).str.replace(",",""), errors="coerce"
                 ).fillna(0)
-
         total = rows["원금"].sum()
         if total < 0:
             continue
-
         def _monthly(r):
             qty  = float(r.get("수량",      0) or 0)
             dps  = float(r.get("주당분배금", 0) or 0)
@@ -2773,20 +2747,17 @@ def build_scenario_params(sc_df: pd.DataFrame, sc_name: str) -> dict:
             elif amt > 0 and rate > 0:
                 return amt * rate / 100
             return 0.0
-
         rows = rows.copy()
         rows["_월분배금"] = rows.apply(_monthly, axis=1)
         total_monthly     = rows["_월분배금"].sum()
         w_rate            = (total_monthly / total * 100) if total > 0 else 0.0
         result[f"{acc_en}_total"] = total
         result[f"{acc_en}_rate"]  = w_rate / 100
-
-        # ★ 과세표준(원) 컬럼 포함해서 종목 추출
         _cols = ["종목명","원금","분배율(%)"]
-        for _extra in ["수량","주당분배금","현재가","메모","원천구분","과세표준(원)"]:
+        for _extra in ["수량","주당분배금","현재가","메모","원천구분"]:
             if _extra in rows.columns:
                 _cols.append(_extra)
-        result[f"{acc_en}_종목"] = rows[_cols].to_dict("records")
+        result[f"{acc_en}_종목"]  = rows[_cols].to_dict("records")
 
     # ★ 시나리오 IRP 원천별 비율 자동 계산
     _sc_irp = sub[sub["계좌"] == "IRP"].copy()
@@ -3546,43 +3517,28 @@ _gen_names   = [r["종목명"] for r in _pension_gen_items if r.get("종목명")
 
 if sc_choice != "기본 시트 현황" and not sc_df.empty:
     _sc = build_scenario_params(sc_df, sc_choice)
-
-    # ★ 미입력 계좌는 명시적으로 0 초기화 (잔류 수치 방지)
-    # 시나리오에 해당 계좌 행이 없으면 _exists=False → 해당 계좌 수입=0
-    if _sc["irp_exists"]:
-        if _sc["irp_total"] > 0: irp_total = _sc["irp_total"]
-        if _sc["irp_rate"]  > 0:
-            palantir_rate    = _sc["irp_rate"]
-            irp_income_input = int(irp_total * palantir_rate)
-    else:
-        # 시나리오에 IRP 없음 → 0으로 초기화
-        irp_total        = 0.0
-        irp_income_input = 0
-
-    if _sc["isa_exists"]:
-        if _sc["isa_total"] > 0: isa_total = _sc["isa_total"]
-        if _sc["isa_rate"]  > 0:
-            kodex_rate       = _sc["isa_rate"]
-            isa_income_input = int(isa_total * kodex_rate)
-    else:
-        isa_total        = 0.0
-        isa_income_input = 0
-
-    if _sc["ps_exists"]:
-        if _sc.get("ps_total", 0) > 0: ps_total = _sc["ps_total"]
-        if _sc.get("ps_rate",  0) > 0:
-            ps_rate         = _sc["ps_rate"]
-            ps_income_input = int(ps_total * ps_rate)
-    else:
-        ps_total        = 0.0
-        ps_income_input = 0
-
-    _gen_sc_exists = _sc["gen_exists"]
+    # 원금 교체
+    if _sc["irp_total"]  > 0: irp_total = _sc["irp_total"]
+    if _sc["isa_total"]  > 0: isa_total = _sc["isa_total"]
+    _gen_sc_exists = not sc_df[
+        (sc_df["시나리오명"] == sc_choice) & (sc_df["계좌"] == "일반")
+    ].empty
     if _gen_sc_exists and _sc["gen_total"] > 0:
         general_total = _sc["gen_total"]
-    elif not _gen_sc_exists:
-        general_total = 0.0
-
+    # 분배율 교체 — 모든 입력 모드에서 적용
+    # (시나리오 분배율로 분배금 재계산 → 실제 대시보드 수치 변화)
+    if _sc["irp_rate"] > 0:
+        palantir_rate    = _sc["irp_rate"]
+        irp_income_input = int(irp_total * palantir_rate)
+    if _sc["isa_rate"] > 0:
+        kodex_rate       = _sc["isa_rate"]
+        isa_income_input = int(isa_total * kodex_rate)
+    # 연금저축: ps_total 먼저 교체 후 ps_income_input 계산
+    if _sc.get("ps_total", 0) > 0:
+        ps_total = _sc["ps_total"]
+    if _sc.get("ps_rate", 0) > 0:
+        ps_rate         = _sc["ps_rate"]
+        ps_income_input = int(ps_total * ps_rate)
     _sc_applied = True
 
     # ★ 시나리오 원천비율을 슬라이더에 반영 (최초 1회)
@@ -3592,10 +3548,12 @@ if sc_choice != "기본 시트 현황" and not sc_df.empty:
 
     # 종목명 추출 — _sc 딕셔너리 우선, 없으면 sc_df 직접 파싱
     def _extract_names(acc_kr):
+        # 방법 1: build_scenario_params 반환값에서
         key = {"IRP":"irp","ISA":"isa","일반":"gen"}.get(acc_kr,"")
         names = [r.get("종목명","") for r in _sc.get(f"{key}_종목",[]) if r.get("종목명","")]
         if names:
             return names
+        # 방법 2: sc_df 직접 필터링
         if not sc_df.empty and "종목명" in sc_df.columns:
             sub = sc_df[(sc_df["시나리오명"]==sc_choice) & (sc_df["계좌"]==acc_kr)]
             return [str(n) for n in sub["종목명"].dropna().tolist() if str(n).strip()]
@@ -3758,6 +3716,35 @@ if not use_health_ins:
     )
 
 display_income = tax_result["총_세후"] if show_tax else total_income
+
+# ── ⑤ 일반계좌 세후분배금: 과세표준 기반 계산 후 display_income에 합산 ──
+# calc_after_tax는 공무원연금·IRP·ISA·연금저축만 포함
+# 일반계좌(gen)는 별도 계산하여 합산
+_gen_tax_ratio = 0.154   # 기본: 분배금 전액 15.4%
+if _sc_applied and "_sc" in dir():
+    # 시나리오 종목별 과세표준(원) → 가중평균 과세비율 계산
+    _gen_items_sc = _sc.get("gen_종목", [])
+    _g_dist_sum   = 0.0
+    _g_taxbase_sum = 0.0
+    for _git in _gen_items_sc:
+        _g_qty    = float(_git.get("수량",          0) or 0)
+        _g_dps    = float(_git.get("주당분배금",     0) or 0)
+        _g_taxdps = float(_git.get("과세표준(원)",   0) or 0)
+        if _g_qty > 0 and _g_dps > 0:
+            _g_dist_sum    += _g_qty * _g_dps
+            _g_taxbase_sum += _g_qty * _g_taxdps
+    if _g_dist_sum > 0 and _g_taxbase_sum >= 0:
+        # 월분배금 기준 과세표준 비율
+        _gen_tax_ratio = (_g_taxbase_sum / _g_dist_sum) * 0.154
+
+_gen_taxbase_monthly = _gen_monthly_income * (_gen_tax_ratio / 0.154)
+_gen_tax_monthly     = _gen_taxbase_monthly * 0.154
+_gen_net_monthly     = _gen_monthly_income - _gen_tax_monthly
+
+if show_tax:
+    display_income += _gen_net_monthly
+else:
+    display_income += _gen_monthly_income
 achievement    = (display_income / target_monthly) * 100 if target_monthly > 0 else 0
 
 # ── 목표 달성 역산 계획 ──────────────────────────────────
@@ -4391,14 +4378,20 @@ with _main_tab1:
         # 일반 계좌 카드 (잔액 있을 때만)
         if general_total > 0:
             _gen_inc  = _gen_monthly_income   # 시나리오/연금현황 수량×DPS 기반
-            _gen_tax  = _gen_inc * 0.154
-            _gen_net  = _gen_inc - _gen_tax
+            # 과세표준 기반 세금 (전역에서 계산된 _gen_tax_monthly 사용)
+            _gen_tax  = _gen_tax_monthly
+            _gen_net  = _gen_net_monthly
+            _taxbase_pct = (_gen_tax_ratio / 0.154 * 100) if _gen_tax_ratio <= 0.154 else 100.0
             with st.container(border=True):
                 st.markdown("**💵 일반**")
                 ga, gb = st.columns(2)
                 ga.metric("세전", f"{_gen_inc:,.0f}원",
                           help="연간 분배금 ÷ 12 (월 평균)")
-                gb.metric("배당소득세 15.4%", f"-{_gen_tax:,.0f}원", delta_color="inverse")
+                _tax_label = (
+                    f"배당소득세 15.4% (과표 {_taxbase_pct:.1f}%)"
+                    if _taxbase_pct < 99.9 else "배당소득세 15.4%"
+                )
+                gb.metric(_tax_label, f"-{_gen_tax:,.0f}원", delta_color="inverse")
                 st.markdown(
                     f"<div style='text-align:right; font-size:1.1rem; "
                     f"font-weight:700; color:#7dffb0;'>"
@@ -4409,22 +4402,26 @@ with _main_tab1:
                 st.caption(f"연 분배금 {_gen_annual_val:,.0f}원 ÷ 12 = 월 {_gen_inc:,.0f}원 "
                            f"(실제 입금: 연 1회)")
 
-        # 합계
+        # 합계 (일반계좌 포함)
+        _total_gross_all = tax_result["총_세전"] + _gen_monthly_income
+        _total_tax_all   = tax_result["총_공제액"] + _gen_tax_monthly
+        _total_net_all   = tax_result["총_세후"] + _gen_net_monthly
+        _eff_rate_all    = (_total_tax_all / _total_gross_all * 100) if _total_gross_all > 0 else 0
         with st.container(border=True):
             st.markdown(
                 f"<div class='tax-row'>"
                 f"<span class='tax-label'>총 세전</span>"
-                f"<span class='tax-val'>{tax_result['총_세전']:,.0f}원</span></div>"
+                f"<span class='tax-val'>{_total_gross_all:,.0f}원</span></div>"
                 f"<div class='tax-row'>"
                 f"<span class='tax-label'>총 공제액</span>"
-                f"<span class='tax-val tax-neg'>-{tax_result['총_공제액']:,.0f}원</span></div>"
+                f"<span class='tax-val tax-neg'>-{_total_tax_all:,.0f}원</span></div>"
                 f"<div class='tax-row' style='border:none; margin-top:6px;'>"
                 f"<span style='font-weight:700;'>총 세후 실수령</span>"
                 f"<span class='tax-val tax-pos' style='font-size:1.1rem;'>"
-                f"{tax_result['총_세후']:,.0f}원</span></div>"
+                f"{_total_net_all:,.0f}원</span></div>"
                 f"<div class='tax-row' style='border:none;'>"
                 f"<span class='tax-label'>실효 세율</span>"
-                f"<span class='tax-val'>{tax_result['실효세율']:.1f}%</span></div>",
+                f"<span class='tax-val'>{_eff_rate_all:.1f}%</span></div>",
                 unsafe_allow_html=True
             )
 

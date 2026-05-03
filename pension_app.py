@@ -132,71 +132,41 @@ def _render_household_tab(
 
     month_df   = hh_df[hh_df["연월"] == sel_ym]
     prev_df    = hh_df[hh_df["연월"] == prev_ym]
+    income_df  = month_df[month_df["구분"] == "수입"]
+    expense_df = month_df[month_df["구분"] == "지출"]
+    prev_inc   = prev_df[prev_df["구분"] == "수입"]
+    prev_exp   = prev_df[prev_df["구분"] == "지출"]
 
-    # ── 이월 판별: 구분='이월' 또는 카테고리='이월' 모두 지원 ──
-    # 시트 입력 방식이 달라도 정상 동작
-    def _is_carryover(df: pd.DataFrame) -> pd.Series:
-        mask = pd.Series(False, index=df.index)
-        if "구분"   in df.columns: mask |= df["구분"].astype(str).str.strip() == "이월"
-        if "카테고리" in df.columns: mask |= df["카테고리"].astype(str).str.strip() == "이월"
-        return mask
-
-    carryover_mask      = _is_carryover(month_df)
-    prev_carryover_mask = _is_carryover(prev_df)
-
-    carryover_df = month_df[carryover_mask]
-    income_df    = month_df[~carryover_mask & (month_df["구분"] == "수입")]
-    expense_df   = month_df[month_df["구분"] == "지출"]
-    prev_co_df   = prev_df[prev_carryover_mask]
-    prev_inc_df  = prev_df[~prev_carryover_mask & (prev_df["구분"] == "수입")]
-    prev_exp_df  = prev_df[prev_df["구분"] == "지출"]
-
-    total_carryover  = carryover_df["금액"].sum()
     total_income_hh  = income_df["금액"].sum()
     total_expense_hh = expense_df["금액"].sum()
-    과부족            = total_income_hh - total_expense_hh
-    잔고              = total_carryover + total_income_hh - total_expense_hh
-    prev_carryover   = prev_co_df["금액"].sum()
-    prev_income_tot  = prev_inc_df["금액"].sum()
-    prev_expense_tot = prev_exp_df["금액"].sum()
-    prev_과부족        = prev_income_tot - prev_expense_tot
+    balance          = total_income_hh - total_expense_hh
+    prev_income_tot  = prev_inc["금액"].sum()
+    prev_expense_tot = prev_exp["금액"].sum()
+    prev_balance     = prev_income_tot - prev_expense_tot
 
     # ════════════════════════════════════════════════════
-    # 1. 상단 5개 KPI 카드: 이월 | 수입 | 지출 | 과부족 | 잔고
+    # 1. 월별 요약 카드 (전월 대비 delta 포함)
     # ════════════════════════════════════════════════════
-    kc1, kc2, kc3, kc4, kc5 = st.columns(5)
-    kc1.metric(
-        "이월", f"{total_carryover:,.0f}원",
-        delta=f"{total_carryover - prev_carryover:+,.0f}원" if prev_carryover else None,
-        help="전월 잔고 이월액 (구분=이월 또는 카테고리=이월)",
-    )
-    kc2.metric(
-        "수입", f"{total_income_hh:,.0f}원",
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric(
+        "총 수입", f"{total_income_hh:,.0f}원",
         delta=f"{total_income_hh - prev_income_tot:+,.0f}원" if prev_income_tot else None,
-        help="이월 제외 실제 수입 합계",
     )
-    kc3.metric(
-        "지출", f"{total_expense_hh:,.0f}원",
+    mc2.metric(
+        "총 지출", f"{total_expense_hh:,.0f}원",
         delta=f"{total_expense_hh - prev_expense_tot:+,.0f}원" if prev_expense_tot else None,
         delta_color="inverse",
-        help="전체 지출 합계",
     )
-    kc4.metric(
-        "과부족", f"{과부족:+,.0f}원",
-        delta=f"{과부족 - prev_과부족:+,.0f}원" if prev_과부족 else None,
-        delta_color="normal" if 과부족 >= 0 else "inverse",
-        help="수입 − 지출",
+    mc3.metric(
+        "잉여/부족", f"{balance:+,.0f}원",
+        delta=f"{balance - prev_balance:+,.0f}원" if prev_balance else None,
+        delta_color="normal" if balance >= 0 else "inverse",
     )
-    kc5.metric(
-        "잔고", f"{잔고:,.0f}원",
-        help="이월 + 수입 − 지출",
+    mc4.metric(
+        "목표 대비",
+        f"{(total_income_hh / target_monthly * 100) if target_monthly > 0 else 0:.0f}%",
+        help="이번달 총 수입 ÷ 목표 생활비",
     )
-
-    # 이전 변수명 호환 (이하 코드에서 balance 참조 시 대비)
-    balance      = 과부족
-    prev_balance = prev_과부족
-    prev_inc     = prev_inc_df
-    prev_exp     = prev_exp_df
 
     st.divider()
 
@@ -225,15 +195,6 @@ def _render_household_tab(
     # ── 수입 내역 ────────────────────────────────────────
     with left_col:
         st.markdown("**💰 수입 내역**")
-        # 이월 별도 표시
-        if total_carryover > 0:
-            st.markdown(
-                f"<div style='display:flex;justify-content:space-between;align-items:center;"
-                f"padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:0.85rem;'>"
-                f"<span style='color:rgba(255,255,255,0.4);font-style:italic;'>↩ 이월</span>"
-                f"<span style='color:rgba(125,255,176,0.5);'>{total_carryover:,.0f}원</span></div>",
-                unsafe_allow_html=True,
-            )
         if not income_df.empty:
             inc_by_cat  = income_df.groupby("카테고리")["금액"].sum().reset_index()
             prev_inc_cat = prev_inc.groupby("카테고리")["금액"].sum().to_dict() if not prev_inc.empty else {}
@@ -438,20 +399,10 @@ def _render_household_tab(
     # ════════════════════════════════════════════════════
     st.divider()
     st.markdown("**📈 월별 수입·지출 추이**")
-    # 이월(구분=이월 or 카테고리=이월) 제외한 수입·지출만 집계
-    _co_mask  = _is_carryover(hh_df)
-    monthly_inc = hh_df[~_co_mask & (hh_df["구분"] == "수입")].groupby("연월")["금액"].sum()
-    monthly_exp = hh_df[hh_df["구분"] == "지출"].groupby("연월")["금액"].sum()
-    monthly_co  = hh_df[_co_mask].groupby("연월")["금액"].sum()
-
-    all_yms = sorted(hh_df["연월"].unique())
-    monthly_hh = pd.DataFrame(index=all_yms)
-    monthly_hh["수입"] = monthly_inc.reindex(all_yms, fill_value=0)
-    monthly_hh["지출"] = monthly_exp.reindex(all_yms, fill_value=0)
-    monthly_hh["이월"] = monthly_co.reindex(all_yms, fill_value=0)
+    monthly_hh = hh_df.groupby(["연월","구분"])["금액"].sum().unstack(fill_value=0).reset_index()
+    if "수입" not in monthly_hh.columns: monthly_hh["수입"] = 0
+    if "지출" not in monthly_hh.columns: monthly_hh["지출"] = 0
     monthly_hh["잉여"] = monthly_hh["수입"] - monthly_hh["지출"]
-    monthly_hh["잔고"] = monthly_hh["이월"] + monthly_hh["수입"] - monthly_hh["지출"]
-    monthly_hh = monthly_hh.reset_index().rename(columns={"index": "연월"})
 
     fig_trend = _go.Figure()
     fig_trend.add_trace(_go.Bar(x=monthly_hh["연월"], y=monthly_hh["수입"]/10000, name="수입", marker_color="rgba(125,255,176,0.7)"))
@@ -1602,6 +1553,70 @@ def _render_holdings_tab(
                             p4.metric("저가", f"{int(hist_df['저가'].min()):,}원")
 
 
+def _calc_net_dist(row, dist_tax_df) -> float:
+    """
+    종목·계좌별 세후분배금 계산 — 과세표준 기반.
+
+    과세 원칙:
+      IRP / 연금저축 : 과세표준 × 5.5% (연금소득세, 과세이연 후 수령 시)
+      ISA           : 과세표준 × 9.9% (비과세한도 초과분 분리과세)
+      일반계좌       : 과세표준 × 15.4% (배당소득세)
+
+    과세표준 조회 우선순위:
+      1순위: 분배금과세 시트의 '과세표준(원)' — 종목명 매칭
+      2순위: 시트 없거나 미입력 → 분배금 전액을 과세표준으로 보수적 처리
+
+    ETF 유형별 특성:
+      - 커버드콜 ETF: 옵션 프리미엄 부분 비과세 → 과세표준 < 분배금
+      - 채권혼합형:   채권이자 과세 → 과세표준 ≤ 분배금
+      - 국내주식형:   배당소득 전액 과세표준
+    """
+    import pandas as pd
+
+    dist_amt = float(row.get("월분배금", 0) or 0)
+    if dist_amt <= 0:
+        return 0.0
+
+    acc     = str(row.get("계좌", "") or "")
+    nm      = str(row.get("종목명", "") or "")
+    qty     = float(row.get("수량", 0) or 0)
+
+    # ── 과세표준 조회 ──────────────────────────────────────
+    # 주당과세표준 × 수량 = 과세표준 합계
+    taxbase_amt = dist_amt  # 기본값: 전액 과세 (보수적)
+
+    if dist_tax_df is not None and not dist_tax_df.empty and qty > 0:
+        def _n(s): return str(s).strip().replace(" ", "").upper()
+        nm_n = _n(nm)
+        # 계좌 조건도 매칭 (같은 종목이 복수 계좌에 있을 수 있음)
+        mask = dist_tax_df["종목명"].astype(str).apply(_n) == nm_n
+        if "계좌" in dist_tax_df.columns:
+            acc_mask = dist_tax_df["계좌"].astype(str).str.strip() == acc
+            if (mask & acc_mask).any():
+                mask = mask & acc_mask
+        if mask.any():
+            row_sh = dist_tax_df[mask].iloc[-1]  # 최신 행 사용
+            dps      = float(row_sh.get("분배금(원)",  0) or 0)
+            tax_dps  = float(row_sh.get("과세표준(원)", 0) or 0)
+            if dps > 0:
+                # 과세표준 비율을 실제 분배금에 적용
+                tax_ratio   = tax_dps / dps          # 예: 60/350 = 0.171
+                taxbase_amt = dist_amt * tax_ratio   # 실제분배금 × 과세비율
+
+    # ── 계좌별 세율 적용 ──────────────────────────────────
+    if acc in ("IRP", "연금저축"):
+        # 연금소득세 5.5% (과세이연 후 수령 시)
+        tax = taxbase_amt * IRP_TAX_RATE
+    elif acc == "ISA":
+        # 9.9% 분리과세 (비과세한도 초과분)
+        tax = taxbase_amt * 0.099
+    else:
+        # 일반계좌: 배당소득세 15.4%
+        tax = taxbase_amt * 0.154
+
+    return dist_amt - tax
+
+
 def _render_watchlist_tab(
     wl_df: pd.DataFrame,
     irp_total: float,
@@ -1613,6 +1628,7 @@ def _render_watchlist_tab(
     show_tax: bool,
     sc_df: pd.DataFrame,
     sc_names: list,
+    dist_tax_df: pd.DataFrame = None,   # 분배금과세 시트 — 과세표준 기반 세금 계산용
 ):
     """🔍 관심종목 탭 — 5개 섹션"""
     st.markdown("#### 🔍 관심종목 연금 포트폴리오 분석")
@@ -1737,10 +1753,12 @@ def _render_watchlist_tab(
                       else (r.get("원금", 0) * r.get("월분배율(%)", 0) / 100),
             axis=1
         )
+    # dist_tax_df가 None이면 빈 DataFrame 사용
+    import pandas as _pd_tax
+    _dtdf = dist_tax_df if (dist_tax_df is not None and not dist_tax_df.empty) else _pd_tax.DataFrame()
+
     wl_df["세후분배금"] = wl_df.apply(
-        lambda r: r["월분배금"] * (1 - IRP_TAX_RATE)
-                  if r.get("계좌") in ["IRP","연금저축"]
-                  else r["월분배금"] * (1 - 0.099),
+        lambda r: _calc_net_dist(r, _dtdf),
         axis=1
     )
 
@@ -3769,6 +3787,7 @@ with _main_tab4:
         target_monthly=target_monthly,
         show_tax=show_tax,
         sc_df=sc_df, sc_names=sc_names,
+        dist_tax_df=dist_tax_df if "dist_tax_df" in dir() else None,
     )
 
 with _main_tab1:

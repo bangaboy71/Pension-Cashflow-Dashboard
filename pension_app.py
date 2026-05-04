@@ -71,7 +71,7 @@ def _render_household_tab(
     isa_income: float,
     now_kst,
 ):
-    """월별 가계부 탭 렌더링 — 카테고리 월별 증감 모니터링 포함"""
+    """월별 가계부 — 이월·수입·지출·과부족·잔고 KPI + 월간 막대 추이"""
     import calendar as _cal
     from datetime import datetime as _dt
     import pandas as pd
@@ -81,21 +81,14 @@ def _render_household_tab(
 
     st.markdown("#### 📒 월별 가계부")
 
-    # ── 시트 미연동 안내 ────────────────────────────────
     if hh_df.empty:
         st.info(
             "**구글 시트에 `가계부` 탭을 추가하고 아래 헤더로 구성하세요.**\n\n"
             "```\n연월 | 구분 | 카테고리 | 항목 | 금액 | 비고\n```\n\n"
-            "| 연월 | 구분 | 카테고리 | 항목 | 금액 | 비고 |\n"
-            "|---|---|---|---|---|---|\n"
-            "| 2026-04 | 수입 | 공무원연금 | 공무원연금 | 3624210 | |\n"
-            "| 2026-04 | 수입 | IRP분배금 | IRP분배금 | 3827200 | |\n"
-            "| 2026-04 | 지출 | 식비 | 마트/외식 | 650000 | |\n"
-            "| 2026-04 | 지출 | 여행/여가 | 알프스 준비 | 500000 | |\n\n"
+            "이월: 구분=이월 또는 카테고리=이월 으로 입력\n"
             "탭 생성 후 gid를 `HOUSEHOLD_SHEET_GID`에 입력하세요."
         )
         st.divider()
-        st.markdown("##### 📊 이번달 예상 수입 (시뮬레이션 기준)")
         _c1, _c2, _c3, _c4 = st.columns(4)
         _c1.metric("공무원연금", f"{public_pension:,.0f}원")
         _c2.metric("IRP 분배금", f"{irp_income:,.0f}원")
@@ -103,358 +96,276 @@ def _render_household_tab(
         _c4.metric("합계", f"{display_income:,.0f}원")
         return
 
-    # ════════════════════════════════════════════════════
-    # 공통 데이터 준비
-    # ════════════════════════════════════════════════════
     hh_df = hh_df.copy()
     hh_df["금액"] = pd.to_numeric(hh_df["금액"], errors="coerce").fillna(0)
-    hh_df["연월"] = hh_df["연월"].astype(str)
+    hh_df["연월"] = hh_df["연월"].astype(str).str[:7]
 
     all_ym = sorted(hh_df["연월"].unique(), reverse=True)
     cur_ym = f"{_dt.now().year}-{_dt.now().month:02d}"
     default_idx = all_ym.index(cur_ym) if cur_ym in all_ym else 0
 
-    # 전월 계산
-    def _prev_ym(ym: str) -> str:
+    def _prev_ym(ym):
         y, m = int(ym[:4]), int(ym[5:7])
         m -= 1
-        if m == 0:
-            m, y = 12, y - 1
+        if m == 0: m, y = 12, y - 1
         return f"{y}-{m:02d}"
 
-    # ── 연월 선택 ────────────────────────────────────────
     sel_col, _, _ = st.columns([2, 3, 3])
-    sel_ym = sel_col.selectbox(
-        "조회 연월", all_ym, index=default_idx, key="hh_ym_sel",
-        label_visibility="collapsed",
-    )
+    sel_ym = sel_col.selectbox("조회 연월", all_ym, index=default_idx,
+                               key="hh_ym_sel", label_visibility="collapsed")
     prev_ym = _prev_ym(sel_ym)
 
-    month_df   = hh_df[hh_df["연월"] == sel_ym]
-    prev_df    = hh_df[hh_df["연월"] == prev_ym]
-    income_df  = month_df[month_df["구분"] == "수입"]
-    expense_df = month_df[month_df["구분"] == "지출"]
-    prev_inc   = prev_df[prev_df["구분"] == "수입"]
-    prev_exp   = prev_df[prev_df["구분"] == "지출"]
+    month_df = hh_df[hh_df["연월"] == sel_ym]
+    prev_df  = hh_df[hh_df["연월"] == prev_ym]
 
-    total_income_hh  = income_df["금액"].sum()
-    total_expense_hh = expense_df["금액"].sum()
-    balance          = total_income_hh - total_expense_hh
-    prev_income_tot  = prev_inc["금액"].sum()
-    prev_expense_tot = prev_exp["금액"].sum()
-    prev_balance     = prev_income_tot - prev_expense_tot
+    # 이월 판별: 구분='이월' 또는 카테고리='이월' 모두 지원
+    def _is_carryover(df):
+        mask = pd.Series(False, index=df.index)
+        if "구분"    in df.columns: mask |= df["구분"].astype(str).str.strip()    == "이월"
+        if "카테고리" in df.columns: mask |= df["카테고리"].astype(str).str.strip() == "이월"
+        return mask
 
-    # ════════════════════════════════════════════════════
-    # 1. 월별 요약 카드 (전월 대비 delta 포함)
-    # ════════════════════════════════════════════════════
-    mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric(
-        "총 수입", f"{total_income_hh:,.0f}원",
-        delta=f"{total_income_hh - prev_income_tot:+,.0f}원" if prev_income_tot else None,
-    )
-    mc2.metric(
-        "총 지출", f"{total_expense_hh:,.0f}원",
-        delta=f"{total_expense_hh - prev_expense_tot:+,.0f}원" if prev_expense_tot else None,
-        delta_color="inverse",
-    )
-    mc3.metric(
-        "잉여/부족", f"{balance:+,.0f}원",
-        delta=f"{balance - prev_balance:+,.0f}원" if prev_balance else None,
-        delta_color="normal" if balance >= 0 else "inverse",
-    )
-    mc4.metric(
-        "목표 대비",
-        f"{(total_income_hh / target_monthly * 100) if target_monthly > 0 else 0:.0f}%",
-        help="이번달 총 수입 ÷ 목표 생활비",
-    )
+    co_mask   = _is_carryover(month_df)
+    p_co_mask = _is_carryover(prev_df)
+
+    carryover_df = month_df[co_mask]
+    income_df    = month_df[~co_mask & (month_df["구분"] == "수입")]
+    expense_df   = month_df[month_df["구분"] == "지출"]
+    prev_co_df   = prev_df[p_co_mask]
+    prev_inc_df  = prev_df[~p_co_mask & (prev_df["구분"] == "수입")]
+    prev_exp_df  = prev_df[prev_df["구분"] == "지출"]
+
+    total_co  = carryover_df["금액"].sum()
+    total_inc = income_df["금액"].sum()
+    total_exp = expense_df["금액"].sum()
+    과부족     = total_inc - total_exp
+    잔고       = total_co + total_inc - total_exp
+    prev_co   = prev_co_df["금액"].sum()
+    prev_inc  = prev_inc_df["금액"].sum()
+    prev_exp  = prev_exp_df["금액"].sum()
+    prev_과부족 = prev_inc - prev_exp
+
+    # ── 5개 KPI: 이월 | 수입 | 지출 | 과부족 | 잔고 ──
+    kc1, kc2, kc3, kc4, kc5 = st.columns(5)
+    kc1.metric("이월",   f"{total_co:,.0f}원",
+               delta=f"{total_co-prev_co:+,.0f}원" if prev_co else None,
+               help="전월 잔고 이월액")
+    kc2.metric("수입",   f"{total_inc:,.0f}원",
+               delta=f"{total_inc-prev_inc:+,.0f}원" if prev_inc else None,
+               help="이월 제외 실제 수입")
+    kc3.metric("지출",   f"{total_exp:,.0f}원",
+               delta=f"{total_exp-prev_exp:+,.0f}원" if prev_exp else None,
+               delta_color="inverse")
+    kc4.metric("과부족", f"{과부족:+,.0f}원",
+               delta=f"{과부족-prev_과부족:+,.0f}원" if prev_과부족 else None,
+               delta_color="normal" if 과부족 >= 0 else "inverse",
+               help="수입 − 지출")
+    kc5.metric("잔고",   f"{잔고:,.0f}원", help="이월 + 수입 − 지출")
 
     st.divider()
 
-    # ════════════════════════════════════════════════════
-    # 2. 수입·지출 카테고리 내역 (전월 대비 증감 포함)
-    # ════════════════════════════════════════════════════
-    left_col, right_col = st.columns(2)
+    # ── 수입·지출 내역 ──
+    def _badge(cur, prv, inv=False):
+        if prv == 0: return ""
+        d = cur - prv; p = d / prv * 100
+        c = ("#FF4B4B" if d > 0 else "#7dffb0") if inv else ("#7dffb0" if d > 0 else "#FF4B4B")
+        return f"<span style='font-size:0.75rem;color:{c};margin-left:6px;'>{'▲' if d>0 else '▼'} {abs(d)/10000:.1f}만 ({p:+.1f}%)</span>"
 
-    def _delta_badge(cur_val: float, prev_val: float, is_expense: bool = False) -> str:
-        """전월 대비 증감 뱃지 HTML"""
-        if prev_val == 0:
-            return ""
-        diff = cur_val - prev_val
-        pct  = diff / prev_val * 100
-        # 지출은 증가가 나쁨(빨강), 수입은 증가가 좋음(초록)
-        if is_expense:
-            color = "#FF4B4B" if diff > 0 else "#7dffb0"
-        else:
-            color = "#7dffb0" if diff > 0 else "#FF4B4B"
-        arrow = "▲" if diff > 0 else "▼"
-        return (
-            f"<span style='font-size:0.75rem; color:{color}; margin-left:6px;'>"
-            f"{arrow} {abs(diff)/10000:.1f}만 ({pct:+.1f}%)</span>"
-        )
-
-    # ── 수입 내역 ────────────────────────────────────────
-    with left_col:
+    lc, rc = st.columns(2)
+    with lc:
         st.markdown("**💰 수입 내역**")
+        if total_co > 0:
+            st.markdown(f"<div style='display:flex;justify-content:space-between;padding:4px 0;"
+                f"border-bottom:1px solid rgba(255,255,255,0.05);font-size:0.85rem;'>"
+                f"<span style='color:rgba(255,255,255,0.4);font-style:italic;'>↩ 이월</span>"
+                f"<span style='color:rgba(125,255,176,0.5);'>{total_co:,.0f}원</span></div>",
+                unsafe_allow_html=True)
         if not income_df.empty:
-            inc_by_cat  = income_df.groupby("카테고리")["금액"].sum().reset_index()
-            prev_inc_cat = prev_inc.groupby("카테고리")["금액"].sum().to_dict() if not prev_inc.empty else {}
-            for _, row in inc_by_cat.iterrows():
-                badge = _delta_badge(row["금액"], prev_inc_cat.get(row["카테고리"], 0), False)
-                st.markdown(
-                    f"<div style='display:flex; justify-content:space-between; align-items:center;"
-                    f"padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.05); font-size:0.88rem;'>"
-                    f"<span style='color:rgba(255,255,255,0.7);'>{row['카테고리']}</span>"
-                    f"<span><span style='color:#7dffb0; font-weight:600;'>{row['금액']:,.0f}원</span>"
-                    f"{badge}</span></div>",
-                    unsafe_allow_html=True,
-                )
-            st.markdown(
-                f"<div style='display:flex; justify-content:space-between; padding:6px 0;"
-                f"font-size:0.9rem; font-weight:700; margin-top:4px;'>"
-                f"<span>합계</span>"
-                f"<span style='color:#7dffb0;'>{total_income_hh:,.0f}원</span></div>",
-                unsafe_allow_html=True,
-            )
-            fig_inc = _px.pie(
-                inc_by_cat, values="금액", names="카테고리", hole=0.45,
-                color_discrete_sequence=["#7dffb0","#87CEEB","#FFD700","#AFA9EC","#FF8C00","#5DCAA5"],
-            )
-            fig_inc.update_layout(
-                height=220, paper_bgcolor="rgba(0,0,0,0)", font_color="white",
+            ibc  = income_df.groupby("카테고리")["금액"].sum().reset_index()
+            pibc = prev_inc_df.groupby("카테고리")["금액"].sum().to_dict() if not prev_inc_df.empty else {}
+            for _, r in ibc.iterrows():
+                st.markdown(f"<div style='display:flex;justify-content:space-between;align-items:center;"
+                    f"padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:0.88rem;'>"
+                    f"<span style='color:rgba(255,255,255,0.7);'>{r['카테고리']}</span>"
+                    f"<span><span style='color:#7dffb0;font-weight:600;'>{r['금액']:,.0f}원</span>"
+                    f"{_badge(r['금액'], pibc.get(r['카테고리'],0))}</span></div>",
+                    unsafe_allow_html=True)
+            st.markdown(f"<div style='display:flex;justify-content:space-between;padding:6px 0;"
+                f"font-size:0.9rem;font-weight:700;'><span>합계</span>"
+                f"<span style='color:#7dffb0;'>{total_inc:,.0f}원</span></div>", unsafe_allow_html=True)
+            fig_i = _px.pie(ibc, values="금액", names="카테고리", hole=0.45,
+                color_discrete_sequence=["#7dffb0","#87CEEB","#FFD700","#AFA9EC","#FF8C00","#5DCAA5"])
+            fig_i.update_layout(height=200, paper_bgcolor="rgba(0,0,0,0)", font_color="white",
                 legend=dict(orientation="h", y=-0.2, xanchor="center", x=0.5),
-                margin=dict(t=10, b=60, l=0, r=0),
-            )
-            st.plotly_chart(fig_inc, use_container_width=True)
+                margin=dict(t=10,b=60,l=0,r=0))
+            st.plotly_chart(fig_i, use_container_width=True)
         else:
             st.caption("수입 내역 없음")
 
-    # ── 지출 내역 ────────────────────────────────────────
-    with right_col:
+    with rc:
         st.markdown("**💸 지출 내역**")
         if not expense_df.empty:
-            exp_by_cat  = expense_df.groupby("카테고리")["금액"].sum().reset_index().sort_values("금액", ascending=False)
-            prev_exp_cat = prev_exp.groupby("카테고리")["금액"].sum().to_dict() if not prev_exp.empty else {}
-            for _, row in exp_by_cat.iterrows():
-                badge = _delta_badge(row["금액"], prev_exp_cat.get(row["카테고리"], 0), True)
-                st.markdown(
-                    f"<div style='display:flex; justify-content:space-between; align-items:center;"
-                    f"padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.05); font-size:0.88rem;'>"
-                    f"<span style='color:rgba(255,255,255,0.7);'>{row['카테고리']}</span>"
-                    f"<span><span style='color:#FF4B4B; font-weight:600;'>{row['금액']:,.0f}원</span>"
-                    f"{badge}</span></div>",
-                    unsafe_allow_html=True,
-                )
-            st.markdown(
-                f"<div style='display:flex; justify-content:space-between; padding:6px 0;"
-                f"font-size:0.9rem; font-weight:700; margin-top:4px;'>"
-                f"<span>합계</span>"
-                f"<span style='color:#FF4B4B;'>{total_expense_hh:,.0f}원</span></div>",
-                unsafe_allow_html=True,
-            )
-            fig_d = _px.pie(
-                exp_by_cat, values="금액", names="카테고리", hole=0.45,
-                color_discrete_sequence=["#87CEEB","#FFD700","#FF4B4B","#7dffb0","#AFA9EC","#FF8C00"],
-            )
-            fig_d.update_layout(
-                height=220, paper_bgcolor="rgba(0,0,0,0)", font_color="white",
+            ebc  = expense_df.groupby("카테고리")["금액"].sum().reset_index().sort_values("금액", ascending=False)
+            pebc = prev_exp_df.groupby("카테고리")["금액"].sum().to_dict() if not prev_exp_df.empty else {}
+            for _, r in ebc.iterrows():
+                st.markdown(f"<div style='display:flex;justify-content:space-between;align-items:center;"
+                    f"padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:0.88rem;'>"
+                    f"<span style='color:rgba(255,255,255,0.7);'>{r['카테고리']}</span>"
+                    f"<span><span style='color:#FF4B4B;font-weight:600;'>{r['금액']:,.0f}원</span>"
+                    f"{_badge(r['금액'], pebc.get(r['카테고리'],0), inv=True)}</span></div>",
+                    unsafe_allow_html=True)
+            st.markdown(f"<div style='display:flex;justify-content:space-between;padding:6px 0;"
+                f"font-size:0.9rem;font-weight:700;'><span>합계</span>"
+                f"<span style='color:#FF4B4B;'>{total_exp:,.0f}원</span></div>", unsafe_allow_html=True)
+            fig_e = _px.pie(ebc, values="금액", names="카테고리", hole=0.45,
+                color_discrete_sequence=["#87CEEB","#FFD700","#FF4B4B","#7dffb0","#AFA9EC","#FF8C00"])
+            fig_e.update_layout(height=200, paper_bgcolor="rgba(0,0,0,0)", font_color="white",
                 legend=dict(orientation="h", y=-0.2, xanchor="center", x=0.5),
-                margin=dict(t=10, b=60, l=0, r=0),
-            )
-            st.plotly_chart(fig_d, use_container_width=True)
+                margin=dict(t=10,b=60,l=0,r=0))
+            st.plotly_chart(fig_e, use_container_width=True)
         else:
             st.caption("지출 내역 없음")
 
-    # ════════════════════════════════════════════════════
-    # 3. 카테고리별 월별 증감 추이 차트 [NEW]
-    # ════════════════════════════════════════════════════
+    # ── 월간 수입·지출·잔고 막대+선 추이 ──
     st.divider()
-    st.markdown("#### 📊 카테고리별 월별 증감 추이")
-
-    # 최근 N개월 선택
-    n_months = st.select_slider(
-        "조회 기간", options=[3, 6, 9, 12], value=6, key="hh_trend_months",
-        format_func=lambda x: f"최근 {x}개월",
-    )
+    st.markdown("#### 📊 월간 수입·지출·잔고 추이")
+    n_months = st.select_slider("조회 기간", options=[3,6,9,12], value=6,
+        key="hh_trend_months", format_func=lambda x: f"최근 {x}개월")
     recent_yms = sorted(hh_df["연월"].unique())[-n_months:]
-    trend_df   = hh_df[hh_df["연월"].isin(recent_yms)]
+    tr_df = hh_df[hh_df["연월"].isin(recent_yms)]
+    _cm  = _is_carryover(tr_df)
+    mo = pd.DataFrame(index=recent_yms)
+    mo["이월"] = tr_df[_cm].groupby("연월")["금액"].sum().reindex(recent_yms, fill_value=0)
+    mo["수입"] = tr_df[~_cm & (tr_df["구분"]=="수입")].groupby("연월")["금액"].sum().reindex(recent_yms, fill_value=0)
+    mo["지출"] = tr_df[tr_df["구분"]=="지출"].groupby("연월")["금액"].sum().reindex(recent_yms, fill_value=0)
+    mo["잔고"] = mo["이월"] + mo["수입"] - mo["지출"]
+    mo["과부족"] = mo["수입"] - mo["지출"]
 
-    trend_tab_inc, trend_tab_exp = st.tabs(["💰 수입 카테고리 추이", "💸 지출 카테고리 추이"])
+    fig_bar = _go.Figure()
+    fig_bar.add_trace(_go.Bar(x=mo.index, y=mo["수입"]/10000, name="수입",
+        marker_color="rgba(125,255,176,0.75)", hovertemplate="%{x} 수입: %{y:.1f}만<extra></extra>"))
+    fig_bar.add_trace(_go.Bar(x=mo.index, y=mo["지출"]/10000, name="지출",
+        marker_color="rgba(255,75,75,0.75)", hovertemplate="%{x} 지출: %{y:.1f}만<extra></extra>"))
+    fig_bar.add_trace(_go.Scatter(x=mo.index, y=mo["잔고"]/10000, name="잔고",
+        mode="lines+markers", line=dict(color="#378ADD",width=2.5,dash="dot"),
+        marker=dict(size=7), yaxis="y2", hovertemplate="%{x} 잔고: %{y:.1f}만<extra></extra>"))
+    fig_bar.add_trace(_go.Scatter(x=mo.index, y=mo["과부족"]/10000, name="과부족",
+        mode="lines+markers", line=dict(color="#FFD700",width=2),
+        marker=dict(size=6), yaxis="y2", hovertemplate="%{x} 과부족: %{y:.1f}만<extra></extra>"))
+    if target_monthly > 0:
+        fig_bar.add_hline(y=target_monthly/10000, line_dash="dot",
+            line_color="rgba(255,255,255,0.25)", line_width=1,
+            annotation_text=f"목표 {target_monthly/10000:.0f}만",
+            annotation_font_color="rgba(255,255,255,0.35)", annotation_position="top left")
+    fig_bar.update_layout(barmode="group", height=300,
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(255,255,255,0.02)",
+        font_color="white", hovermode="x unified",
+        legend=dict(orientation="h", y=-0.3, xanchor="center", x=0.5),
+        margin=dict(t=10,b=80,l=10,r=10),
+        xaxis=dict(tickangle=-30, tickfont=dict(size=11)),
+        yaxis=dict(title="만원", tickformat=","),
+        yaxis2=dict(title="잔고/과부족(만)", overlaying="y", side="right",
+                    tickformat=",", showgrid=False))
+    st.plotly_chart(fig_bar, use_container_width=True)
 
-    # ── 수입 카테고리 추이 ────────────────────────────────
-    with trend_tab_inc:
-        inc_trend = (
-            trend_df[trend_df["구분"] == "수입"]
-            .groupby(["연월", "카테고리"])["금액"]
-            .sum()
-            .reset_index()
-        )
-        if not inc_trend.empty:
-            cats = inc_trend["카테고리"].unique()
-            COLORS = ["#7dffb0","#87CEEB","#FFD700","#AFA9EC","#FF8C00","#5DCAA5","#C8A8E9"]
+    # 월별 요약 테이블
+    st.markdown("##### 월별 집계 요약")
+    tbl = [{"연월":ym, "이월(만)":round(mo.loc[ym,"이월"]/10000,1),
+            "수입(만)":round(mo.loc[ym,"수입"]/10000,1),
+            "지출(만)":round(mo.loc[ym,"지출"]/10000,1),
+            "과부족(만)":round(mo.loc[ym,"과부족"]/10000,1),
+            "잔고(만)":round(mo.loc[ym,"잔고"]/10000,1)} for ym in recent_yms]
+    st.dataframe(pd.DataFrame(tbl).set_index("연월"), use_container_width=True,
+        column_config={"이월(만)":st.column_config.NumberColumn(format="%.1f"),
+                       "수입(만)":st.column_config.NumberColumn(format="%.1f"),
+                       "지출(만)":st.column_config.NumberColumn(format="%.1f"),
+                       "과부족(만)":st.column_config.NumberColumn(format="%+.1f"),
+                       "잔고(만)":st.column_config.NumberColumn(format="%.1f")})
+
+    # ── 카테고리별 추이 탭 ──
+    st.divider()
+    st.markdown("#### 📈 카테고리별 월별 증감 추이")
+    ti, te = st.tabs(["💰 수입 카테고리 추이", "💸 지출 카테고리 추이"])
+    COLORS_I = ["#7dffb0","#87CEEB","#FFD700","#AFA9EC","#FF8C00","#5DCAA5","#C8A8E9"]
+    COLORS_E = ["#FF4B4B","#FFD700","#87CEEB","#AFA9EC","#FF8C00","#7dffb0","#C8A8E9"]
+    _cm2 = _is_carryover(tr_df)
+
+    with ti:
+        itd = (tr_df[~_cm2 & (tr_df["구분"]=="수입")]
+               .groupby(["연월","카테고리"])["금액"].sum().reset_index())
+        if not itd.empty:
             fig_it = _go.Figure()
-            for i, cat in enumerate(cats):
-                d = inc_trend[inc_trend["카테고리"] == cat].set_index("연월").reindex(recent_yms).fillna(0).reset_index()
-                fig_it.add_trace(_go.Scatter(
-                    x=d["연월"], y=d["금액"] / 10000,
-                    name=cat, mode="lines+markers",
-                    line=dict(color=COLORS[i % len(COLORS)], width=2),
-                    marker=dict(size=6),
-                    hovertemplate=f"{cat}: %{{y:.1f}}만원<extra></extra>",
-                ))
-            fig_it.update_layout(
-                height=300, paper_bgcolor="rgba(0,0,0,0)",
+            for i, cat in enumerate(itd["카테고리"].unique()):
+                d = itd[itd["카테고리"]==cat].set_index("연월").reindex(recent_yms).fillna(0).reset_index()
+                fig_it.add_trace(_go.Scatter(x=d["연월"], y=d["금액"]/10000, name=cat,
+                    mode="lines+markers", line=dict(color=COLORS_I[i%len(COLORS_I)],width=2),
+                    marker=dict(size=6), hovertemplate=f"{cat}: %{{y:.1f}}만<extra></extra>"))
+            fig_it.update_layout(height=260, paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(255,255,255,0.02)", font_color="white",
                 legend=dict(orientation="h", y=-0.3, xanchor="center", x=0.5),
-                margin=dict(t=10, b=80, l=10, r=10),
-                yaxis=dict(title="금액 (만원)", tickformat=","),
-                xaxis=dict(tickangle=-30), hovermode="x unified",
-            )
+                margin=dict(t=10,b=80,l=10,r=10),
+                yaxis=dict(title="만원",tickformat=","), xaxis=dict(tickangle=-30),
+                hovermode="x unified")
             st.plotly_chart(fig_it, use_container_width=True)
-
-            # 전월 대비 증감 테이블
-            inc_pivot = inc_trend.pivot_table(index="카테고리", columns="연월", values="금액", aggfunc="sum", fill_value=0)
-            _show_mom_table(inc_pivot, recent_yms, is_expense=False)
+            _show_mom_table(
+                itd.pivot_table(index="카테고리",columns="연월",values="금액",aggfunc="sum",fill_value=0),
+                recent_yms, is_expense=False)
         else:
             st.caption("수입 데이터 없음")
 
-    # ── 지출 카테고리 추이 ────────────────────────────────
-    with trend_tab_exp:
-        exp_trend = (
-            trend_df[trend_df["구분"] == "지출"]
-            .groupby(["연월", "카테고리"])["금액"]
-            .sum()
-            .reset_index()
-        )
-        if not exp_trend.empty:
-            cats_e = exp_trend["카테고리"].unique()
-            COLORS_E = ["#FF4B4B","#FFD700","#87CEEB","#AFA9EC","#FF8C00","#7dffb0","#C8A8E9"]
+    with te:
+        etd = (tr_df[tr_df["구분"]=="지출"]
+               .groupby(["연월","카테고리"])["금액"].sum().reset_index())
+        if not etd.empty:
             fig_et = _go.Figure()
-            for i, cat in enumerate(cats_e):
-                d = exp_trend[exp_trend["카테고리"] == cat].set_index("연월").reindex(recent_yms).fillna(0).reset_index()
-                fig_et.add_trace(_go.Scatter(
-                    x=d["연월"], y=d["금액"] / 10000,
-                    name=cat, mode="lines+markers",
-                    line=dict(color=COLORS_E[i % len(COLORS_E)], width=2),
-                    marker=dict(size=6),
-                    hovertemplate=f"{cat}: %{{y:.1f}}만원<extra></extra>",
-                ))
-            fig_et.update_layout(
-                height=300, paper_bgcolor="rgba(0,0,0,0)",
+            for i, cat in enumerate(etd["카테고리"].unique()):
+                d = etd[etd["카테고리"]==cat].set_index("연월").reindex(recent_yms).fillna(0).reset_index()
+                fig_et.add_trace(_go.Scatter(x=d["연월"], y=d["금액"]/10000, name=cat,
+                    mode="lines+markers", line=dict(color=COLORS_E[i%len(COLORS_E)],width=2),
+                    marker=dict(size=6), hovertemplate=f"{cat}: %{{y:.1f}}만<extra></extra>"))
+            fig_et.update_layout(height=260, paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(255,255,255,0.02)", font_color="white",
                 legend=dict(orientation="h", y=-0.3, xanchor="center", x=0.5),
-                margin=dict(t=10, b=80, l=10, r=10),
-                yaxis=dict(title="금액 (만원)", tickformat=","),
-                xaxis=dict(tickangle=-30), hovermode="x unified",
-            )
+                margin=dict(t=10,b=80,l=10,r=10),
+                yaxis=dict(title="만원",tickformat=","), xaxis=dict(tickangle=-30),
+                hovermode="x unified")
             st.plotly_chart(fig_et, use_container_width=True)
-
-            exp_pivot = exp_trend.pivot_table(index="카테고리", columns="연월", values="금액", aggfunc="sum", fill_value=0)
-            _show_mom_table(exp_pivot, recent_yms, is_expense=True)
+            _show_mom_table(
+                etd.pivot_table(index="카테고리",columns="연월",values="금액",aggfunc="sum",fill_value=0),
+                recent_yms, is_expense=True)
         else:
             st.caption("지출 데이터 없음")
 
-    # ════════════════════════════════════════════════════
-    # 4. 지출 카테고리 히트맵 [NEW]
-    # ════════════════════════════════════════════════════
+    # ── 지출 히트맵 ──
     st.divider()
     st.markdown("#### 🗓️ 지출 카테고리 히트맵")
-    st.caption("월×카테고리 지출 패턴 — 색이 진할수록 지출 多")
-
-    hm_exp = (
-        hh_df[hh_df["구분"] == "지출"]
-        .groupby(["연월", "카테고리"])["금액"]
-        .sum()
-        .reset_index()
-    )
-    if not hm_exp.empty:
-        hm_pivot = hm_exp.pivot_table(index="연월", columns="카테고리", values="금액", fill_value=0)
-        hm_pivot = hm_pivot.sort_index()
-
-        fig_hm = _go.Figure(_go.Heatmap(
-            z=hm_pivot.values / 10000,
-            x=hm_pivot.columns.tolist(),
-            y=hm_pivot.index.tolist(),
-            colorscale=[
-                [0.0, "#1a1a2e"], [0.3, "#16213e"],
-                [0.6, "#c0392b"], [1.0, "#FF4B4B"],
-            ],
-            hovertemplate="%{y} %{x}: %{z:.1f}만원<extra></extra>",
-            showscale=True,
-            colorbar=dict(title=dict(text="만원"), tickfont=dict(color="rgba(255,255,255,0.6)", size=10), thickness=12),
-            xgap=2, ygap=2,
-        ))
-        fig_hm.update_layout(
-            height=max(250, len(hm_pivot) * 28 + 80),
+    hm = (hh_df[hh_df["구분"]=="지출"]
+          .groupby(["연월","카테고리"])["금액"].sum().reset_index())
+    if not hm.empty:
+        hp = hm.pivot_table(index="연월",columns="카테고리",values="금액",fill_value=0).sort_index()
+        fig_hm = _go.Figure(_go.Heatmap(z=hp.values/10000, x=hp.columns.tolist(), y=hp.index.tolist(),
+            colorscale=[[0,"#1a1a2e"],[0.3,"#16213e"],[0.6,"#c0392b"],[1,"#FF4B4B"]],
+            hovertemplate="%{y} %{x}: %{z:.1f}만원<extra></extra>", showscale=True,
+            colorbar=dict(title=dict(text="만원"),tickfont=dict(color="rgba(255,255,255,0.6)",size=10),thickness=12),
+            xgap=2, ygap=2))
+        fig_hm.update_layout(height=max(220, len(hp)*28+60),
             paper_bgcolor="rgba(0,0,0,0)", font_color="white",
-            margin=dict(t=20, b=40, l=10, r=80),
-            xaxis=dict(tickfont=dict(size=11), side="top", tickangle=-30),
-            yaxis=dict(tickfont=dict(size=11), autorange="reversed"),
-        )
+            margin=dict(t=20,b=40,l=10,r=80),
+            xaxis=dict(tickfont=dict(size=11),side="top",tickangle=-30),
+            yaxis=dict(tickfont=dict(size=11),autorange="reversed"))
         st.plotly_chart(fig_hm, use_container_width=True)
-    else:
-        st.caption("지출 데이터 없음")
 
-    # ════════════════════════════════════════════════════
-    # 5. 기존: 월별 수입·지출 추이 바 차트
-    # ════════════════════════════════════════════════════
-    st.divider()
-    st.markdown("**📈 월별 수입·지출 추이**")
-    monthly_hh = hh_df.groupby(["연월","구분"])["금액"].sum().unstack(fill_value=0).reset_index()
-    if "수입" not in monthly_hh.columns: monthly_hh["수입"] = 0
-    if "지출" not in monthly_hh.columns: monthly_hh["지출"] = 0
-    monthly_hh["잉여"] = monthly_hh["수입"] - monthly_hh["지출"]
-
-    fig_trend = _go.Figure()
-    fig_trend.add_trace(_go.Bar(x=monthly_hh["연월"], y=monthly_hh["수입"]/10000, name="수입", marker_color="rgba(125,255,176,0.7)"))
-    fig_trend.add_trace(_go.Bar(x=monthly_hh["연월"], y=monthly_hh["지출"]/10000, name="지출", marker_color="rgba(255,75,75,0.7)"))
-    fig_trend.add_trace(_go.Scatter(x=monthly_hh["연월"], y=monthly_hh["잉여"]/10000, name="잉여/부족", mode="lines+markers", line=dict(color="#FFD700", width=2)))
-    fig_trend.add_hline(y=target_monthly/10000, line_dash="dot", line_color="rgba(255,255,255,0.3)", line_width=1,
-                        annotation_text=f"목표 {target_monthly/10000:.0f}만", annotation_font_color="rgba(255,255,255,0.4)")
-    fig_trend.update_layout(
-        barmode="group", height=300, paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(255,255,255,0.02)", font_color="white",
-        legend=dict(orientation="h", y=-0.25, xanchor="center", x=0.5),
-        margin=dict(t=10, b=70, l=10, r=10),
-        yaxis=dict(title="만원", tickformat=","), xaxis=dict(tickangle=-30), hovermode="x unified",
-    )
-    st.plotly_chart(fig_trend, use_container_width=True)
-
-    # ════════════════════════════════════════════════════
-    # 6. 기존: 연간 누계 + 상세 내역
-    # ════════════════════════════════════════════════════
+    # ── 연간 누계 ──
     st.divider()
     st.markdown("**📆 연간 누계**")
     hh_df["연도"] = hh_df["연월"].str[:4]
-    annual_hh = hh_df.groupby(["연도","구분"])["금액"].sum().unstack(fill_value=0).reset_index()
+    _cma = _is_carryover(hh_df)
+    annual_hh = (hh_df[~_cma].groupby(["연도","구분"])["금액"].sum()
+                 .unstack(fill_value=0).reset_index())
     if "수입" not in annual_hh.columns: annual_hh["수입"] = 0
     if "지출" not in annual_hh.columns: annual_hh["지출"] = 0
-    annual_hh["잉여"] = annual_hh["수입"] - annual_hh["지출"]
-    for col in ["수입","지출","잉여"]:
-        annual_hh[col] = (annual_hh[col]/10000).round(1)
-    import streamlit as st
-    st.dataframe(
-        annual_hh.rename(columns={"수입":"수입(만원)","지출":"지출(만원)","잉여":"잉여(만원)"}),
-        hide_index=True, use_container_width=True,
-        column_config={
-            "수입(만원)": st.column_config.NumberColumn(format="%,.1f"),
-            "지출(만원)": st.column_config.NumberColumn(format="%,.1f"),
-            "잉여(만원)": st.column_config.NumberColumn(format="%+.1f"),
-        },
-    )
-
-    with st.expander("📋 이번달 상세 내역"):
-        disp = month_df[["구분","카테고리","항목","금액"] +
-                        (["비고"] if "비고" in month_df.columns else [])].copy()
-        disp["금액"] = disp["금액"].apply(lambda x: f"{x:,.0f}")
-        st.dataframe(disp, hide_index=True, use_container_width=True)
-
-    st.divider()
-    _render_actual_section(url=_SHEET_URL_REF, target_monthly=target_monthly)
 
 
-# ════════════════════════════════════════════════════════
-# 헬퍼: 전월 대비 증감 테이블
-# ════════════════════════════════════════════════════════
 def _show_mom_table(pivot, recent_yms, is_expense: bool = False):
     """카테고리 × 연월 피벗 → 전월 대비 증감 포함 st.dataframe 출력"""
     import pandas as pd
@@ -664,210 +575,119 @@ def _fetch_usd_krw() -> float:
 
 
 def _get_code_type(code: str) -> str:
-    """
-    종목코드 타입 판별 → 수집 경로 결정.
-      'mixed'  : 영숫자 혼합 (0040Y0, 0018C0, 0177R0) → 네이버 전용
-      'krx'    : 순수 숫자 6자리 (189400, 498400)      → Yahoo KRW
-      'us'     : 순수 영문 (SNDK, PLTR, AAPL)          → Yahoo USD→원화
-      'dotted' : 점 포함 (189400.KS)                   → Yahoo 그대로
-    """
+    """코드 타입: mixed(혼합) / krx(순수숫자) / us(영문) / dotted(점포함)"""
     c = str(code).strip().upper()
-    if not c or c in ("NAN", "0", ""):
-        return "unknown"
-    if "." in c:     return "dotted"
-    if c.isalpha():  return "us"
-    if c.isdigit():  return "krx"
+    if not c or c in ("NAN","0",""): return "unknown"
+    if "." in c:    return "dotted"
+    if c.isalpha(): return "us"
+    if c.isdigit(): return "krx"
     return "mixed"
 
 
 def _fetch_krx_mixed_price(raw_code: str) -> tuple[int, float, float]:
-    """
-    KRX 혼합코드(0040Y0, 0018C0, 0177R0 등) 전용 가격 수집.
-    Yahoo Finance 미등록 → 네이버 전용 2단계 경로.
-
-    1단계: 네이버 polling API
-      - compareToPreviousPrice 파싱
-      - stockItemTotalInfos 배열 탐색 (ETF 혼합코드 대응)
-      - 전일대비 확보 시 즉시 반환
-    2단계: fchart XML API (폴백)
-      - 최근 3거래일 종가 파싱 → diff 계산
-    """
+    """혼합코드(0040Y0 등) 전용 — 네이버 polling + fchart XML 2단계"""
     import requests as _req
-    naver_code = raw_code.upper().replace(".KS", "").replace(".KQ", "")
-    if not naver_code:
-        return 0, 0.0, 0.0
-
-    _headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer":    "https://finance.naver.com",
-        "Accept":     "application/json, */*",
-    }
-
+    naver_code = raw_code.upper().replace(".KS","").replace(".KQ","")
+    if not naver_code: return 0, 0.0, 0.0
+    _h = {"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Referer":"https://finance.naver.com","Accept":"application/json, */*"}
     now_p, raw_pct, raw_amt = 0, 0.0, 0
-
-    # ── 1단계: 네이버 polling API ─────────────────────────
     try:
-        url = (f"https://polling.finance.naver.com/api/realtime"
-               f"/domestic/stock/{naver_code}")
-        res = _req.get(url, headers=_headers, timeout=6)
+        res = _req.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{naver_code}",
+                       headers=_h, timeout=6)
         if res.status_code == 200:
-            d = res.json().get("datas", [{}])[0]
-            now_p = int(str(d.get("closePrice", "0")).replace(",", "") or 0)
+            d = res.json().get("datas",[{}])[0]
+            now_p = int(str(d.get("closePrice","0")).replace(",","") or 0)
             if now_p > 0:
-                ctp = d.get("compareToPreviousPrice", {}) or {}
-                pct_str = str(ctp.get("fluctuationsRatio", "") or
-                              ctp.get("changeRate", "") or "").replace(",", "").replace("%", "")
-                amt_str = str(ctp.get("diff", "") or
-                              ctp.get("change", "") or "").replace(",", "").replace("+", "").replace("-", "")
-                # ETF 혼합코드: stockItemTotalInfos 배열 탐색
+                ctp = d.get("compareToPreviousPrice",{}) or {}
+                pct_str = str(ctp.get("fluctuationsRatio","") or ctp.get("changeRate","") or "").replace(",","").replace("%","")
+                amt_str = str(ctp.get("diff","") or ctp.get("change","") or "").replace(",","").replace("+","").replace("-","")
                 if not pct_str:
-                    for item in d.get("stockItemTotalInfos", []):
-                        label = str(item.get("label", "") or item.get("name", ""))
-                        val   = str(item.get("value", "") or "").replace(",", "").replace("%", "").replace("+", "").replace("-", "")
-                        if "등락률" in label or "등락율" in label or "변동률" in label:
-                            if val.replace(".", "").isdigit():
-                                pct_str = val
-                        elif ("전일대비" in label or "대비" in label) and not amt_str:
-                            if val.isdigit():
-                                amt_str = val
+                    for item in d.get("stockItemTotalInfos",[]):
+                        label = str(item.get("label","") or item.get("name",""))
+                        val   = str(item.get("value","") or "").replace(",","").replace("%","").replace("+","").replace("-","")
+                        if ("등락률" in label or "등락율" in label or "변동률" in label) and val.replace(".","").isdigit():
+                            pct_str = val
+                        elif ("전일대비" in label or "대비" in label) and not amt_str and val.isdigit():
+                            amt_str = val
                 try:
                     raw_pct = float(pct_str) if pct_str else 0.0
                     raw_amt = int(amt_str)   if amt_str else 0
-                except (ValueError, TypeError):
+                except (ValueError,TypeError):
                     raw_pct, raw_amt = 0.0, 0
-                sign = str(ctp.get("code", "") or ctp.get("fluctuationType", "")).upper()
-                if sign in ("5", "LOWER", "하락", "FALL"):
+                sign = str(ctp.get("code","") or ctp.get("fluctuationType","")).upper()
+                if sign in ("5","LOWER","하락","FALL"):
                     raw_pct, raw_amt = -abs(raw_pct), -abs(raw_amt)
-                elif sign in ("2", "UPPER", "상승", "RISE"):
+                elif sign in ("2","UPPER","상승","RISE"):
                     raw_pct, raw_amt = abs(raw_pct), abs(raw_amt)
     except Exception:
         pass
-
     if now_p > 0 and (raw_pct != 0 or raw_amt != 0):
         return now_p, round(raw_pct, 2), raw_amt
-
-    # ── 2단계: fchart XML API 폴백 ────────────────────────
     try:
-        xml_url = (f"https://fchart.stock.naver.com/sise.nhn"
-                   f"?symbol={naver_code}&timeframe=day&count=3&requestType=0")
-        xres = _req.get(xml_url, headers=_headers, timeout=6)
+        xres = _req.get(f"https://fchart.stock.naver.com/sise.nhn?symbol={naver_code}&timeframe=day&count=3&requestType=0",
+                        headers=_h, timeout=6)
         if xres.status_code == 200 and xres.text.strip():
             import re as _re
-            items  = _re.findall(r'data="([^"]+)"', xres.text)
             closes = []
-            for it in items:
+            for it in _re.findall(r'data="([^"]+)"', xres.text):
                 parts = it.split("|")
                 if len(parts) >= 5:
-                    try:
-                        closes.append(int(parts[4]))
-                    except ValueError:
-                        pass
+                    try: closes.append(int(parts[4]))
+                    except ValueError: pass
             if len(closes) >= 2:
-                curr = closes[-1]
-                prev = closes[-2]
-                if now_p == 0:
-                    now_p = curr
+                curr = closes[-1]; prev = closes[-2]
+                if now_p == 0: now_p = curr
                 if prev > 0:
-                    diff     = now_p - prev
-                    diff_pct = diff / prev * 100
-                    return now_p, round(diff_pct, 2), diff
+                    diff = now_p - prev
+                    return now_p, round(diff/prev*100, 2), diff
     except Exception:
         pass
-
     return now_p, 0.0, 0
 
 
 def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
-    """
-    종목코드 타입을 먼저 판별 → 최적 경로로 가격 수집.
-
-    혼합코드 (0040Y0, 0018C0, 0177R0)
-      → _fetch_krx_mixed_price(): 네이버 polling + fchart XML
-
-    순수숫자 KRX (189400, 498400) / 미국주식 (SNDK) / dotted
-      → Yahoo Finance
-         1순위: regularMarketChangePercent (직접 제공, 가장 안정)
-         2순위: chartPreviousClose (전일 종가 직접)
-         3순위: timestamp 배열 순회
-    """
+    """코드 타입 판별 → 최적 경로로 (현재가, 전일대비%, 전일대비금액) 수집."""
     raw = str(code).strip().upper()
-    if not raw or raw in ("NAN", "0", ""):
-        return 0, 0.0, 0.0
-
+    if not raw or raw in ("NAN","0",""): return 0, 0.0, 0.0
     code_type = _get_code_type(raw)
-
-    # ── 혼합코드 전용 경로 ────────────────────────────────
     if code_type == "mixed":
         return _fetch_krx_mixed_price(raw)
-
-    # ── Yahoo Finance 경로 (krx / us / dotted) ────────────
     ycode = _normalize_code(raw)
-    if not ycode:
-        return 0, 0.0, 0.0
-
+    if not ycode: return 0, 0.0, 0.0
     try:
-        import requests as _req
-        import datetime as _dt
-
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ycode}"
-        res = _req.get(
-            url, headers={"User-Agent": "Mozilla/5.0"},
-            params={"interval": "1d", "range": "5d"}, timeout=8,
-        )
-        data   = res.json()
-        result = data["chart"]["result"][0]
-        meta   = result["meta"]
-
-        now_p_raw = float(meta.get("regularMarketPrice", 0))
+        import requests as _req, datetime as _dt
+        res  = _req.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{ycode}",
+                        headers={"User-Agent":"Mozilla/5.0"},
+                        params={"interval":"1d","range":"5d"}, timeout=8)
+        meta = res.json()["chart"]["result"][0]["meta"]
+        result = res.json()["chart"]["result"][0]
+        now_p_raw = float(meta.get("regularMarketPrice",0))
         if now_p_raw > 0:
-            currency = str(meta.get("currency", "KRW")).upper()
-            fx       = _fetch_usd_krw() if currency == "USD" else 1.0
-            now_p    = int(round(now_p_raw * fx))
-
-            # 1순위: regularMarketChangePercent (Yahoo 직접 제공)
-            direct_pct = float(meta.get("regularMarketChangePercent", 0) or 0)
-            direct_chg = float(meta.get("regularMarketChange", 0) or 0)
-            if direct_pct != 0 or direct_chg != 0:
-                return now_p, round(direct_pct, 2), int(round(direct_chg * fx))
-
-            # 2순위: chartPreviousClose (전일 종가 직접)
-            prev_p_raw = float(
-                meta.get("chartPreviousClose", 0) or
-                meta.get("previousClose", 0) or 0
-            )
-
-            # 3순위: timestamp 배열 순회
-            if prev_p_raw == 0:
+            fx    = _fetch_usd_krw() if str(meta.get("currency","KRW")).upper()=="USD" else 1.0
+            now_p = int(round(now_p_raw * fx))
+            dpct  = float(meta.get("regularMarketChangePercent",0) or 0)
+            dchg  = float(meta.get("regularMarketChange",0) or 0)
+            if dpct != 0 or dchg != 0:
+                return now_p, round(dpct,2), int(round(dchg*fx))
+            prev_raw = float(meta.get("chartPreviousClose",0) or meta.get("previousClose",0) or 0)
+            if prev_raw == 0:
                 now_kst = _dt.datetime.utcnow() + _dt.timedelta(hours=9)
-                today_start_utc = int(
-                    _dt.datetime(now_kst.year, now_kst.month, now_kst.day)
-                    .replace(tzinfo=_dt.timezone.utc).timestamp()
-                ) - 9 * 3600
-                ts_list  = result.get("timestamp", [])
-                cls_list = result["indicators"]["quote"][0].get("close", [])
-                for ts, cl in zip(reversed(ts_list), reversed(cls_list)):
-                    if cl is None or cl <= 0: continue
-                    if ts < today_start_utc:
-                        prev_p_raw = cl; break
-                if prev_p_raw == 0:
-                    valid = [(t, cl) for t, cl in zip(ts_list, cls_list) if cl and cl > 0]
-                    if len(valid) >= 2:
-                        prev_p_raw = valid[-2][1]
-
-            if prev_p_raw == 0:
-                prev_p_raw = now_p_raw
-
-            prev_p  = int(round(prev_p_raw * fx))
-            chg_amt = now_p - prev_p
-            chg_pct = (chg_amt / prev_p * 100) if prev_p > 0 else 0.0
-            return now_p, round(chg_pct, 2), chg_amt
+                t0 = int(_dt.datetime(now_kst.year,now_kst.month,now_kst.day)
+                         .replace(tzinfo=_dt.timezone.utc).timestamp()) - 9*3600
+                ts_l  = result.get("timestamp",[])
+                cls_l = result["indicators"]["quote"][0].get("close",[])
+                for ts,cl in zip(reversed(ts_l),reversed(cls_l)):
+                    if cl and cl>0 and ts<t0: prev_raw=cl; break
+                if prev_raw==0:
+                    valid = [(t,c) for t,c in zip(ts_l,cls_l) if c and c>0]
+                    if len(valid)>=2: prev_raw=valid[-2][1]
+            if prev_raw==0: prev_raw=now_p_raw
+            prev_p=int(round(prev_raw*fx)); chg=now_p-prev_p
+            return now_p, round((chg/prev_p*100) if prev_p>0 else 0.0,2), chg
     except Exception:
         pass
-
-    return 0, 0.0, 0.0
-
-
-@st.cache_data(ttl="3m", show_spinner=False)
+    return 0, 0.0, 0.0@st.cache_data(ttl="3m", show_spinner=False)
 def fetch_watchlist_prices(codes: tuple) -> dict:
     """
     관심종목 코드 리스트 → {코드: (현재가, 전일대비%, 전일대비금액)} 딕셔너리.

@@ -687,7 +687,10 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
             return now_p, round((chg/prev_p*100) if prev_p>0 else 0.0,2), chg
     except Exception:
         pass
-    return 0, 0.0, 0.0@st.cache_data(ttl="3m", show_spinner=False)
+    return 0, 0.0, 0.0
+
+
+@st.cache_data(ttl="3m", show_spinner=False)
 def fetch_watchlist_prices(codes: tuple) -> dict:
     """
     관심종목 코드 리스트 → {코드: (현재가, 전일대비%, 전일대비금액)} 딕셔너리.

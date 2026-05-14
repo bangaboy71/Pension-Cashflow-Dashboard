@@ -949,7 +949,8 @@ def _render_holdings_tab(
         eval_amt = qty * price if qty > 0 and price > 0 else amt
         gain     = eval_amt - amt if price > 0 and qty > 0 else 0
         gain_pct = (gain / amt * 100) if amt > 0 else 0
-        day_diff = day_amt * qty if day_amt != 0 and qty > 0 else 0
+        day_diff = int(day_amt * qty) if day_amt != 0 and qty > 0 else 0
+        # ↑ day_amt = 1주당 전일대비금액(원), qty 곱해 보유 전체 전일대비금액 계산
         rows.append({
             **it,
             "매입단가":      int(amt / qty) if qty > 0 else 0,

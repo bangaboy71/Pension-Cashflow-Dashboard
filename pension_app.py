@@ -646,61 +646,139 @@ def _fetch_krx_mixed_price(raw_code: str) -> tuple[int, float, float]:
     return now_p, 0.0, 0
 
 
+def _fetch_naver_price(naver_code: str) -> tuple[int, float, float]:
+    """
+    네이버 금융 실시간 polling API → (현재가, 전일대비%, 전일대비원).
+    분배락·수정주가 영향 없이 실제 등락 그대로 반환.
+    """
+    import requests as _req
+    _h = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer":    "https://finance.naver.com",
+        "Accept":     "application/json, */*",
+    }
+    try:
+        res = _req.get(
+            f"https://polling.finance.naver.com/api/realtime/domestic/stock/{naver_code}",
+            headers=_h, timeout=6,
+        )
+        if res.status_code != 200:
+            return 0, 0.0, 0
+        d = res.json().get("datas", [{}])[0]
+        now_p = int(str(d.get("closePrice", "0")).replace(",", "") or 0)
+        if now_p <= 0:
+            return 0, 0.0, 0
+
+        ctp     = d.get("compareToPreviousPrice", {}) or {}
+        pct_str = str(
+            ctp.get("fluctuationsRatio", "")
+            or ctp.get("changeRate", "") or ""
+        ).replace(",", "").replace("%", "").strip()
+        amt_str = str(
+            ctp.get("diff", "")
+            or ctp.get("change", "") or ""
+        ).replace(",", "").replace("+", "").replace("-", "").strip()
+
+        # stockItemTotalInfos 폴백
+        if not pct_str or not amt_str:
+            for item in d.get("stockItemTotalInfos", []):
+                label = str(item.get("label", "") or item.get("name", ""))
+                val   = str(item.get("value", "") or "").replace(",", "").replace("%", "").replace("+", "").replace("-", "").strip()
+                if ("등락률" in label or "등락율" in label or "변동률" in label) and val.replace(".", "").isdigit():
+                    pct_str = pct_str or val
+                elif ("전일대비" in label or "대비" in label) and val.isdigit():
+                    amt_str = amt_str or val
+
+        raw_pct = float(pct_str) if pct_str else 0.0
+        raw_amt = int(amt_str)   if amt_str else 0
+
+        # 부호 결정
+        sign = str(ctp.get("code", "") or ctp.get("fluctuationType", "")).upper()
+        if sign in ("5", "LOWER", "하락", "FALL"):
+            raw_pct, raw_amt = -abs(raw_pct), -abs(raw_amt)
+        elif sign in ("2", "UPPER", "상승", "RISE"):
+            raw_pct, raw_amt =  abs(raw_pct),  abs(raw_amt)
+
+        # pct·amt 둘 다 0이면 직접 계산
+        if raw_pct == 0 and raw_amt == 0:
+            return now_p, 0.0, 0
+        # amt만 있고 pct 없으면 역산
+        if raw_pct == 0 and raw_amt != 0:
+            prev = now_p - raw_amt
+            raw_pct = round(raw_amt / prev * 100, 2) if prev > 0 else 0.0
+        # pct만 있고 amt 없으면 역산
+        if raw_amt == 0 and raw_pct != 0:
+            raw_amt = int(round(now_p * raw_pct / 100))
+
+        return now_p, round(raw_pct, 2), raw_amt
+
+    except Exception:
+        return 0, 0.0, 0
+
+
 def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
-    """코드 타입 판별 → 최적 경로로 (현재가, 전일대비%, 전일대비금액) 수집."""
+    """
+    종목코드 → (현재가, 전일대비%, 전일대비원) 수집.
+
+    수집 전략:
+      1. 네이버 polling API  — KRX 전종목, 분배락 무관 실제 등락 반환 (1순위)
+      2. Yahoo Finance v8    — 미국 주식 / 네이버 실패 시 폴백
+         ※ Yahoo regularMarketChange/Percent는 수정주가 기준이므로 사용하지 않음.
+            OHLCV 히스토리 전일 bar close를 전일종가로 직접 계산.
+    """
     raw = str(code).strip().upper()
-    if not raw or raw in ("NAN","0",""): return 0, 0.0, 0.0
-    code_type = _get_code_type(raw)
-    if code_type == "mixed":
-        return _fetch_krx_mixed_price(raw)
+    if not raw or raw in ("NAN", "0", ""):
+        return 0, 0.0, 0.0
+
+    code_type  = _get_code_type(raw)
+    naver_code = raw.replace(".KS", "").replace(".KQ", "")
+
+    # ── 1순위: 네이버 polling (KRX 종목 전용) ─────────────────────
+    if code_type in ("krx", "dotted", "mixed"):
+        result = _fetch_naver_price(naver_code)
+        if result[0] > 0:
+            return result
+        # mixed 코드는 네이버 fchart XML 2단계 폴백
+        if code_type == "mixed":
+            return _fetch_krx_mixed_price(raw)
+
+    # ── 2순위: Yahoo Finance (미국 주식 or KRX 네이버 실패) ───────
     ycode = _normalize_code(raw)
-    if not ycode: return 0, 0.0, 0.0
+    if not ycode:
+        return 0, 0.0, 0.0
     try:
         import requests as _req, datetime as _dt
-        res  = _req.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{ycode}",
-                        headers={"User-Agent":"Mozilla/5.0"},
-                        params={"interval":"1d","range":"5d"}, timeout=8)
-        data   = res.json()["chart"]["result"][0]
-        meta   = data["meta"]
+        res = _req.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{ycode}",
+            headers={"User-Agent": "Mozilla/5.0"},
+            params={"interval": "1d", "range": "5d"}, timeout=8,
+        )
+        data      = res.json()["chart"]["result"][0]
+        meta      = data["meta"]
         now_p_raw = float(meta.get("regularMarketPrice", 0))
         if now_p_raw <= 0:
             return 0, 0.0, 0.0
 
-        fx    = _fetch_usd_krw() if str(meta.get("currency","KRW")).upper()=="USD" else 1.0
+        fx    = _fetch_usd_krw() if str(meta.get("currency", "KRW")).upper() == "USD" else 1.0
         now_p = int(round(now_p_raw * fx))
 
-        # ── 전일 종가: OHLCV 히스토리에서 직접 추출 ──────────────────
-        # Yahoo Finance의 regularMarketChangePercent/regularMarketChange는
-        # 분배락·수정주가 기준으로 계산되어 실제 등락과 크게 다를 수 있음.
-        # 5d 히스토리의 close 배열에서 오늘 이전 마지막 유효 종가를 전일 종가로 사용.
-        try:
-            import datetime as _dt2
-            now_kst = _dt2.datetime.utcnow() + _dt2.timedelta(hours=9)
-            today_date = now_kst.date()
+        # Yahoo regularMarketChange/Percent는 수정주가 기준 → 사용하지 않음
+        # OHLCV 히스토리에서 오늘 이전 마지막 bar close = 전일 종가
+        ts_list  = data.get("timestamp", [])
+        cls_list = data["indicators"]["quote"][0].get("close", [])
+        now_kst  = _dt.datetime.utcnow() + _dt.timedelta(hours=9)
+        today    = now_kst.date()
 
-            ts_list  = data.get("timestamp", [])
-            cls_list = data["indicators"]["quote"][0].get("close", [])
+        prev_raw = 0.0
+        for ts, cl in zip(reversed(ts_list), reversed(cls_list)):
+            if cl and cl > 0:
+                bar_date = (_dt.datetime.utcfromtimestamp(ts)
+                            + _dt.timedelta(hours=9)).date()
+                if bar_date < today:
+                    prev_raw = float(cl)
+                    break
 
-            # 오늘 날짜 미만의 유효 close 중 가장 최근 값 = 전일 종가
-            prev_raw = 0.0
-            for ts, cl in zip(reversed(ts_list), reversed(cls_list)):
-                if cl and cl > 0:
-                    bar_date = (_dt2.datetime.utcfromtimestamp(ts)
-                                + _dt2.timedelta(hours=9)).date()
-                    if bar_date < today_date:
-                        prev_raw = float(cl)
-                        break
-
-            # 히스토리가 부족하면 chartPreviousClose 폴백
-            if prev_raw <= 0:
-                prev_raw = float(
-                    meta.get("chartPreviousClose", 0)
-                    or meta.get("previousClose", 0)
-                    or 0
-                )
-            if prev_raw <= 0:
-                prev_raw = now_p_raw  # 전일 종가 불명 → 변동 없음으로 처리
-        except Exception:
+        if prev_raw <= 0:
             prev_raw = float(
                 meta.get("chartPreviousClose", 0)
                 or meta.get("previousClose", 0)

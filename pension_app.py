@@ -660,31 +660,58 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
         res  = _req.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{ycode}",
                         headers={"User-Agent":"Mozilla/5.0"},
                         params={"interval":"1d","range":"5d"}, timeout=8)
-        meta = res.json()["chart"]["result"][0]["meta"]
-        result = res.json()["chart"]["result"][0]
-        now_p_raw = float(meta.get("regularMarketPrice",0))
-        if now_p_raw > 0:
-            fx    = _fetch_usd_krw() if str(meta.get("currency","KRW")).upper()=="USD" else 1.0
-            now_p = int(round(now_p_raw * fx))
-            dpct  = float(meta.get("regularMarketChangePercent",0) or 0)
-            dchg  = float(meta.get("regularMarketChange",0) or 0)
-            if dpct != 0 or dchg != 0:
-                return now_p, round(dpct,2), int(round(dchg*fx))
-            prev_raw = float(meta.get("chartPreviousClose",0) or meta.get("previousClose",0) or 0)
-            if prev_raw == 0:
-                now_kst = _dt.datetime.utcnow() + _dt.timedelta(hours=9)
-                t0 = int(_dt.datetime(now_kst.year,now_kst.month,now_kst.day)
-                         .replace(tzinfo=_dt.timezone.utc).timestamp()) - 9*3600
-                ts_l  = result.get("timestamp",[])
-                cls_l = result["indicators"]["quote"][0].get("close",[])
-                for ts,cl in zip(reversed(ts_l),reversed(cls_l)):
-                    if cl and cl>0 and ts<t0: prev_raw=cl; break
-                if prev_raw==0:
-                    valid = [(t,c) for t,c in zip(ts_l,cls_l) if c and c>0]
-                    if len(valid)>=2: prev_raw=valid[-2][1]
-            if prev_raw==0: prev_raw=now_p_raw
-            prev_p=int(round(prev_raw*fx)); chg=now_p-prev_p
-            return now_p, round((chg/prev_p*100) if prev_p>0 else 0.0,2), chg
+        data   = res.json()["chart"]["result"][0]
+        meta   = data["meta"]
+        now_p_raw = float(meta.get("regularMarketPrice", 0))
+        if now_p_raw <= 0:
+            return 0, 0.0, 0.0
+
+        fx    = _fetch_usd_krw() if str(meta.get("currency","KRW")).upper()=="USD" else 1.0
+        now_p = int(round(now_p_raw * fx))
+
+        # ── 전일 종가: OHLCV 히스토리에서 직접 추출 ──────────────────
+        # Yahoo Finance의 regularMarketChangePercent/regularMarketChange는
+        # 분배락·수정주가 기준으로 계산되어 실제 등락과 크게 다를 수 있음.
+        # 5d 히스토리의 close 배열에서 오늘 이전 마지막 유효 종가를 전일 종가로 사용.
+        try:
+            import datetime as _dt2
+            now_kst = _dt2.datetime.utcnow() + _dt2.timedelta(hours=9)
+            today_date = now_kst.date()
+
+            ts_list  = data.get("timestamp", [])
+            cls_list = data["indicators"]["quote"][0].get("close", [])
+
+            # 오늘 날짜 미만의 유효 close 중 가장 최근 값 = 전일 종가
+            prev_raw = 0.0
+            for ts, cl in zip(reversed(ts_list), reversed(cls_list)):
+                if cl and cl > 0:
+                    bar_date = (_dt2.datetime.utcfromtimestamp(ts)
+                                + _dt2.timedelta(hours=9)).date()
+                    if bar_date < today_date:
+                        prev_raw = float(cl)
+                        break
+
+            # 히스토리가 부족하면 chartPreviousClose 폴백
+            if prev_raw <= 0:
+                prev_raw = float(
+                    meta.get("chartPreviousClose", 0)
+                    or meta.get("previousClose", 0)
+                    or 0
+                )
+            if prev_raw <= 0:
+                prev_raw = now_p_raw  # 전일 종가 불명 → 변동 없음으로 처리
+        except Exception:
+            prev_raw = float(
+                meta.get("chartPreviousClose", 0)
+                or meta.get("previousClose", 0)
+                or now_p_raw
+            )
+
+        prev_p = int(round(prev_raw * fx))
+        chg    = now_p - prev_p
+        dpct   = round((chg / prev_p * 100) if prev_p > 0 else 0.0, 2)
+        return now_p, dpct, chg
+
     except Exception:
         pass
     return 0, 0.0, 0.0

@@ -648,32 +648,72 @@ def _fetch_krx_mixed_price(raw_code: str) -> tuple[int, float, float]:
 
 def _fetch_naver_price(naver_code: str) -> tuple[int, float, float]:
     """
-    네이버 금융 HTML 파싱 → (현재가, 전일대비%, 전일대비원).
-    가족자산 관제탑(data_engine.py)과 동일한 방식.
-    전일종가를 HTML에서 직접 읽어 계산 → 분배락/수정주가 이슈 없음.
+    네이버 fchart API → (현재가, 전일대비%, 전일대비원).
+
+    수집 전략:
+      1순위: fchart.stock.naver.com 일봉 API
+             → 수정 전 실제 종가 반환, 분배락 무관
+             → 최근 3일 close에서 [전전일, 전일, 오늘] 추출
+      2순위: finance.naver.com HTML 파싱 (폴백)
+             → 단, HTML의 '전일종가'는 분배락 수정값일 수 있으므로
+               분배락 없는 종목에서만 정확
     """
-    import requests as _req
+    import requests as _req, re as _re
+    _h = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer":    "https://finance.naver.com",
+    }
+
+    # ── 1순위: fchart 일봉 API (수정 전 실제 종가) ────────────────
+    try:
+        xres = _req.get(
+            f"https://fchart.stock.naver.com/sise.nhn"
+            f"?symbol={naver_code}&timeframe=day&count=3&requestType=0",
+            headers=_h, timeout=6,
+        )
+        if xres.status_code == 200 and xres.text.strip():
+            closes = []
+            for it in _re.findall(r'data="([^"]+)"', xres.text):
+                parts = it.split("|")
+                if len(parts) >= 5:
+                    try:
+                        v = int(parts[4])
+                        if v > 0:
+                            closes.append(v)
+                    except ValueError:
+                        pass
+            # closes = [..., 전전일, 전일, 오늘] 순
+            if len(closes) >= 2:
+                now_p  = closes[-1]
+                prev_p = closes[-2]
+                chg    = now_p - prev_p
+                dpct   = round(chg / prev_p * 100, 2) if prev_p > 0 else 0.0
+                return now_p, dpct, chg
+    except Exception:
+        pass
+
+    # ── 2순위: 네이버 HTML 파싱 (fchart 실패 시) ──────────────────
     try:
         res = _req.get(
             f"https://finance.naver.com/item/main.naver?code={naver_code}",
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=5,
         )
-        if res.status_code != 200:
-            return 0, 0.0, 0
-        from bs4 import BeautifulSoup as _BS
-        soup   = _BS(res.text, "html.parser")
-        now_p  = int(soup.find("div", {"class": "today"})
-                         .find("span", {"class": "blind"}).text.replace(",", ""))
-        prev_p = int(soup.find("td", {"class": "first"})
-                         .find("span", {"class": "blind"}).text.replace(",", ""))
-        if now_p <= 0 or prev_p <= 0:
-            return 0, 0.0, 0
-        chg  = now_p - prev_p
-        dpct = round(chg / prev_p * 100, 2) if prev_p > 0 else 0.0
-        return now_p, dpct, chg
+        if res.status_code == 200:
+            from bs4 import BeautifulSoup as _BS
+            soup   = _BS(res.text, "html.parser")
+            now_p  = int(soup.find("div", {"class": "today"})
+                             .find("span", {"class": "blind"}).text.replace(",", ""))
+            prev_p = int(soup.find("td", {"class": "first"})
+                             .find("span", {"class": "blind"}).text.replace(",", ""))
+            if now_p > 0 and prev_p > 0:
+                chg  = now_p - prev_p
+                dpct = round(chg / prev_p * 100, 2)
+                return now_p, dpct, chg
     except Exception:
-        return 0, 0.0, 0
+        pass
+
+    return 0, 0.0, 0
 
 
 def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
@@ -702,7 +742,7 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
         if code_type == "mixed":
             return _fetch_krx_mixed_price(raw)
 
-    # ── 2순위: Yahoo Finance OHLCV 히스토리 (미국 주식 or 네이버 실패) ──
+    # ── 2순위: Yahoo Finance (미국 주식 or 네이버 실패) ──────────
     ycode = _normalize_code(raw)
     if not ycode:
         return 0, 0.0, 0.0
@@ -722,8 +762,16 @@ def _fetch_price_by_code(code: str) -> tuple[int, float, float]:
         fx    = _fetch_usd_krw() if str(meta.get("currency", "KRW")).upper() == "USD" else 1.0
         now_p = int(round(now_p_raw * fx))
 
-        # OHLCV 히스토리에서 전일 종가 직접 추출
-        # (regularMarketChange/Percent는 수정주가 기준이므로 사용하지 않음)
+        # 미국 주식: regularMarketChange 직접 사용 (수정주가 이슈 없음)
+        # KRX 종목이 여기까지 왔다면 fchart 실패한 것 → OHLCV 히스토리 사용
+        api_dpct = float(meta.get("regularMarketChangePercent", 0) or 0)
+        api_dchg = float(meta.get("regularMarketChange", 0) or 0)
+
+        if code_type == "us" and (api_dpct != 0 or api_dchg != 0):
+            # 미국 주식은 분배락 수정주가 이슈가 KRX보다 적으므로 API 값 우선
+            return now_p, round(api_dpct, 2), int(round(api_dchg * fx))
+
+        # KRX 폴백 or 미국 주식 API 값 없는 경우: OHLCV 히스토리로 계산
         ts_list  = data.get("timestamp", [])
         cls_list = data["indicators"]["quote"][0].get("close", [])
         now_kst  = _dt.datetime.utcnow() + _dt.timedelta(hours=9)

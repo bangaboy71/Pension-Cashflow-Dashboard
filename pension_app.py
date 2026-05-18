@@ -3825,6 +3825,33 @@ _main_tab1, _main_tab2, _main_tab3, _main_tab4, _main_tab5, _main_tab6, _main_ta
     "♻️ 재투자 시뮬레이터",
 ])
 
+# ── IRP 실시간 평가금액 사전 조회 (탭 진입 전 공통 실행) ──────────────
+# _render_holdings_tab 내부의 가격 조회 로직을 재사용해
+# irp_risk_monitor 에 평가금액 기준 데이터를 전달합니다.
+@st.cache_data(ttl=60, show_spinner=False)
+def _fetch_irp_eval_prices(codes: tuple) -> dict:
+    """IRP 종목 현재가 조회 (60초 캐시)"""
+    try:
+        return fetch_watchlist_prices(codes)
+    except Exception:
+        return {}
+
+_irp_codes = list({
+    _normalize_code(str(it.get("종목코드", "")).strip())
+    for it in _pension_irp_items
+    if str(it.get("종목코드", "")).strip() not in ("", "nan", "0")
+})
+_irp_prices_raw = _fetch_irp_eval_prices(tuple(_irp_codes)) if _irp_codes else {}
+
+# 종목명 → 현재가 매핑 (코드 기반)
+_irp_price_map: dict[str, int] = {}
+for _it in _pension_irp_items:
+    _code  = _normalize_code(str(_it.get("종목코드", "")).strip())
+    _price = _irp_prices_raw.get(_code, (0,))[0] if _code else 0
+    if _price > 0:
+        _irp_price_map[str(_it.get("종목명", "")).strip()] = int(_price)
+
+
 with _main_tab2:
     _render_household_tab(hh_df, display_income, target_monthly, public_pension,
                           irp_income, isa_income, now_kst=datetime.now())
@@ -3855,9 +3882,9 @@ with _main_tab4:
     )
 
 with _main_tab1:
-    # ── IRP 위험자산 비중 모니터 ──────────────────────────
+    # ── IRP 위험자산 비중 모니터 (평가금액 기준) ──────────
     from irp_risk_monitor import render_irp_risk_monitor
-    render_irp_risk_monitor(_pension_irp_items, irp_total)
+    render_irp_risk_monitor(_pension_irp_items, irp_total, _irp_price_map)
     st.markdown("---")
 
     tax_label = "세후 " if show_tax else "세전 "

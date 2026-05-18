@@ -3855,6 +3855,11 @@ with _main_tab4:
     )
 
 with _main_tab1:
+    # ── IRP 위험자산 비중 모니터 ──────────────────────────
+    from irp_risk_monitor import render_irp_risk_monitor
+    render_irp_risk_monitor(_pension_irp_items, irp_total)
+    st.markdown("---")
+
     tax_label = "세후 " if show_tax else "세전 "
     st.markdown(
         f"### 현재 예상 월 수입 ({tax_label}): "
